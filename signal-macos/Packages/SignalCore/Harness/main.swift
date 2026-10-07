@@ -21,4 +21,8 @@ run("ScaffoldTests.testModuleLoads") {
     )
 }
 
+run("LibsignalRoundTripTests") {
+    runLibsignalRoundTripTests()
+}
+
 exit(checkResult())
