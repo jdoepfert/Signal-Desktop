@@ -1,0 +1,36 @@
+[
+  {
+    "isFramework" : false,
+    "moduleName" : "Swift",
+    "modulePath" : "\/Users\/joerg\/Documents\/Github\/Signal-Desktop\/signal-macos\/.build\/out\/SDKExplicitPrecompiledModules\/Swift-29HB9QZRJRHSL.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "SwiftOnoneSupport",
+    "modulePath" : "\/Users\/joerg\/Documents\/Github\/Signal-Desktop\/signal-macos\/.build\/out\/SDKExplicitPrecompiledModules\/SwiftOnoneSupport-2WGE5ZDB7QEI4.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_Concurrency",
+    "modulePath" : "\/Users\/joerg\/Documents\/Github\/Signal-Desktop\/signal-macos\/.build\/out\/SDKExplicitPrecompiledModules\/_Concurrency-1D3GP8VLLCP8N.swiftmodule"
+  },
+  {
+    "isFramework" : false,
+    "moduleName" : "_StringProcessing",
+    "modulePath" : "\/Users\/joerg\/Documents\/Github\/Signal-Desktop\/signal-macos\/.build\/out\/SDKExplicitPrecompiledModules\/_StringProcessing-1A6RH1SV9R18U.swiftmodule"
+  },
+  {
+    "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/lib\/swift\/shims\/module.modulemap",
+    "clangModulePath" : "\/Users\/joerg\/Documents\/Github\/Signal-Desktop\/signal-macos\/.build\/out\/SDKExplicitPrecompiledModules\/SwiftShims-CNA33A348VLYJSU4M2KLES9VI.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "SwiftShims"
+  },
+  {
+    "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/lib\/swift\/shims\/module.modulemap",
+    "clangModulePath" : "\/Users\/joerg\/Documents\/Github\/Signal-Desktop\/signal-macos\/.build\/out\/SDKExplicitPrecompiledModules\/_SwiftConcurrencyShims-FXPPH62HR0GQU1RYDAOCCU4T.pcm",
+    "isBridgingHeaderDependency" : false,
+    "isFramework" : false,
+    "moduleName" : "_SwiftConcurrencyShims"
+  }
+]

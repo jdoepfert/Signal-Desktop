@@ -1,0 +1,4 @@
+Target dependency graph (2 targets)
+Target 'SpikeHarness-product' in project 'signal-macos'
+➜ Explicit dependency on target 'SignalCore' in project 'signal-macos'
+Target 'SignalCore' in project 'signal-macos' (no dependencies)

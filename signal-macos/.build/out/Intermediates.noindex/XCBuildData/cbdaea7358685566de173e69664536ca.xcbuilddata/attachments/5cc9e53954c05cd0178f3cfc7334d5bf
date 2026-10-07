@@ -1,0 +1,19 @@
+{
+  "" : {
+    "diagnostics" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/SignalCore-primary.dia",
+    "emit-module-dependencies" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/SignalCore-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/SignalCore-primary-emit-module.dia",
+    "pch" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/SignalCore-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/SignalCore-primary.swiftdeps"
+  },
+  "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/Packages/SignalCore/Sources/SignalCore/placeholder.swift" : {
+    "const-values" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/placeholder.swiftconstvalues",
+    "dependencies" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/placeholder.d",
+    "diagnostics" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/placeholder.dia",
+    "index-unit-output-path" : "/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/placeholder.o",
+    "llvm-bc" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/placeholder.bc",
+    "object" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/placeholder.o",
+    "swift-dependencies" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/placeholder.swiftdeps",
+    "swiftmodule" : "/Users/joerg/Documents/Github/Signal-Desktop/signal-macos/.build/out/Intermediates.noindex/signal-macos.build/Debug/SignalCore-t.build/Objects-normal/arm64/placeholder~partial.swiftmodule"
+  }
+}
