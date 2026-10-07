@@ -1,7 +1,0 @@
-Target dependency graph (3 targets)
-Target 'AllExcludingTests' in project 'Aggregate'
-➜ Explicit dependency on target 'SpikeHarness-product' in project 'signal-macos'
-➜ Explicit dependency on target 'SignalCore' in project 'signal-macos'
-Target 'SpikeHarness-product' in project 'signal-macos'
-➜ Explicit dependency on target 'SignalCore' in project 'signal-macos'
-Target 'SignalCore' in project 'signal-macos' (no dependencies)

@@ -49,3 +49,6 @@ ts/protobuf/*.d.ts
 /.zed
 *.sublime*
 *.map
+
+# Native Swift spike (docs/superpowers/specs/2026-10-07-native-swift-macos-design.md)
+signal-macos/.build/

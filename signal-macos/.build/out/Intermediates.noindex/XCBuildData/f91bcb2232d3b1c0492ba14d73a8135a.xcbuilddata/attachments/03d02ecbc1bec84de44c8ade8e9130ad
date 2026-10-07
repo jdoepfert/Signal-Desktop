@@ -1,4 +1,0 @@
-module SignalCore {
-header "SignalCore-Swift.h"
-export *
-}
