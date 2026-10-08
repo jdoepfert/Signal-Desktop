@@ -3,6 +3,7 @@
 
 import Foundation
 import LibSignalClient
+import SignalStorage
 
 // Content proto layout (protos/SignalService.proto, proto2):
 //   Content { DataMessage dataMessage = 1; }
@@ -49,28 +50,37 @@ public protocol SenderCertProvider: Sendable {
 /// the actor starts. Revisit with a real `Sendable` store in Phase 1.
 extension InMemorySignalProtocolStore: @retroactive @unchecked Sendable {}
 
+/// In-memory conformance so spike-era call sites keep compiling; new code
+/// uses `GRDBProtocolStore`.
+extension InMemorySignalProtocolStore: @retroactive SignalProtocolStore {}
+
 /// 1:1 sealed-sender message pipe: encrypting send with single cert-rotation
 /// retry, decrypting receive mapped to `DecryptedMessage`.
 public actor MessagePipe {
     private let transport: any SealedMessageTransport
     private let certs: any SenderCertProvider
-    private let store: InMemorySignalProtocolStore
+    private let store: any SignalProtocolStore
     private let ourAddress: ProtocolAddress
     private let trustRoot: PublicKey
     private let source: AsyncStream<Data>?
+    private let messages: MessageStore?
     private let stream: AsyncStream<DecryptedMessage>
     private let continuation: AsyncStream<DecryptedMessage>.Continuation
     private var pumpTask: Task<Void, Never>?
 
     /// - Parameter incomingSource: test seam; defaults to the transport's
     ///   live envelope stream.
+    /// - Parameter messages: when present, inbound messages persist here and
+    ///   duplicates (same sender + timestamp) are stored — and yielded —
+    ///   once.
     public init(
         transport: any SealedMessageTransport,
         certs: any SenderCertProvider,
-        store: InMemorySignalProtocolStore,
+        store: any SignalProtocolStore,
         ourAddress: ProtocolAddress,
         trustRoot: PublicKey,
-        incomingSource: AsyncStream<Data>? = nil
+        incomingSource: AsyncStream<Data>? = nil,
+        messages: MessageStore? = nil
     ) {
         self.transport = transport
         self.certs = certs
@@ -78,6 +88,7 @@ public actor MessagePipe {
         self.ourAddress = ourAddress
         self.trustRoot = trustRoot
         self.source = incomingSource
+        self.messages = messages
         var continuation: AsyncStream<DecryptedMessage>.Continuation!
         self.stream = AsyncStream { continuation = $0 }
         self.continuation = continuation
@@ -155,9 +166,19 @@ public actor MessagePipe {
                     ourAddress: ourAddress,
                     trustRoot: trustRoot
                 )
+                if let messages {
+                    let (_, inserted) = try messages.save(
+                        senderAci: message.senderAci,
+                        body: message.body,
+                        timestamp: message.timestamp
+                    )
+                    guard inserted else {
+                        continue
+                    }
+                }
                 continuation.yield(message)
             } catch {
-                // Drop undecodable inbound messages (logged in Phase 1).
+                // Drop undecodable inbound messages (logged in Phase 2).
                 continue
             }
         }
@@ -166,7 +187,7 @@ public actor MessagePipe {
 
     private static func decode(
         _ envelope: Data,
-        store: InMemorySignalProtocolStore,
+        store: any SignalProtocolStore,
         ourAddress: ProtocolAddress,
         trustRoot: PublicKey
     ) throws -> DecryptedMessage {
@@ -206,41 +227,5 @@ public actor MessagePipe {
             body: body,
             timestamp: timestamp
         )
-    }
-}
-
-/// Minimal proto2 encoder for the two shapes MessagePipe emits.
-enum ContentCodec {
-    static func lengthDelimitedField(_ number: Int, _ bytes: Data) -> Data {
-        var out = Data()
-        out.append(UInt8(number << 3 | 2))
-        out.append(contentsOf: varintBytes(bytes.count))
-        out.append(bytes)
-        return out
-    }
-
-    static func varintField(_ number: Int, _ value: UInt64) -> Data {
-        var out = Data()
-        out.append(UInt8(number << 3))
-        out.append(contentsOf: varintBytes(value))
-        return out
-    }
-
-    private static func varintBytes(_ value: Int) -> [UInt8] {
-        varintBytes(UInt64(value))
-    }
-
-    private static func varintBytes(_ value: UInt64) -> [UInt8] {
-        var out = [UInt8]()
-        var rest = value
-        repeat {
-            var byte = UInt8(rest & 0x7F)
-            rest >>= 7
-            if rest != 0 {
-                byte |= 0x80
-            }
-            out.append(byte)
-        } while rest != 0
-        return out
     }
 }

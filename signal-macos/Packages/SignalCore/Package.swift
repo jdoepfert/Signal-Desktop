@@ -28,7 +28,10 @@ let package = Package(
     targets: [
         .target(
             name: "SignalCore",
-            dependencies: [.product(name: "LibSignalClient", package: "swift")],
+            dependencies: [
+                .product(name: "LibSignalClient", package: "swift"),
+                "SignalStorage",
+            ],
             linkerSettings: [.unsafeFlags(["-L\(ffiLibDir)"])]
         ),
         .executableTarget(

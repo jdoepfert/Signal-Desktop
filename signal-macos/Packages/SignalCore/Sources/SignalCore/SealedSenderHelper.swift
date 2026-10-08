@@ -3,6 +3,7 @@
 
 import Foundation
 import LibSignalClient
+import SignalStorage
 
 public enum SealedSenderHelperError: Error {
     case untrustedSender
@@ -23,7 +24,7 @@ public func sealedSenderEncrypt(
     _ plaintext: Data,
     from senderCert: SenderCertificate,
     to recipient: ProtocolAddress,
-    senderStore: InMemorySignalProtocolStore,
+    senderStore: any SignalProtocolStore,
     context: StoreContext
 ) throws -> Data {
     let senderAddress = try ProtocolAddress(
@@ -59,7 +60,7 @@ public func sealedSenderEncrypt(
 public func sealedSenderDecryptUnknownSender(
     _ envelope: Data,
     to recipient: ProtocolAddress,
-    recipientStore: InMemorySignalProtocolStore,
+    recipientStore: any SignalProtocolStore,
     trustRoot: PublicKey,
     context: StoreContext
 ) throws -> (plaintext: Data, senderAci: String) {
@@ -95,7 +96,7 @@ public func sealedSenderDecrypt(
     _ envelope: Data,
     to recipient: ProtocolAddress,
     from sender: ProtocolAddress,
-    recipientStore: InMemorySignalProtocolStore,
+    recipientStore: any SignalProtocolStore,
     trustRoot: PublicKey,
     context: StoreContext
 ) throws -> Data {
@@ -116,7 +117,7 @@ private func decryptInnerContent(
     _ content: UnidentifiedSenderMessageContent,
     from sender: ProtocolAddress,
     to recipient: ProtocolAddress,
-    recipientStore: InMemorySignalProtocolStore,
+    recipientStore: any SignalProtocolStore,
     context: StoreContext
 ) throws -> Data {
     switch content.messageType {

@@ -47,6 +47,7 @@ run("RingRTCTests") {
 
 await runAsync("MessagePipeTests") {
     await runMessagePipeTests()
+    await runPersistedReceiveTests()
 }
 
 run("EnvironmentTests") {
