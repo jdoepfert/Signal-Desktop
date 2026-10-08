@@ -86,12 +86,14 @@ public enum MigrationChain {
                 t.column("members_json", .text).notNull()
             }
             try db.create(table: "attachments") { t in
-                t.column("message_id", .integer).notNull()
+                // digest-addressed: uploads persist (pointer + key) before
+                // any message references them; message_id links later.
+                t.column("digest", .blob).primaryKey()
                 t.column("cdn_key", .text).notNull()
-                t.column("digest", .blob).notNull()
                 t.column("size", .integer).notNull()
                 t.column("content_type", .text).notNull()
-                t.primaryKey(["message_id", "cdn_key"])
+                t.column("key_bytes", .blob).notNull()
+                t.column("message_id", .integer)
             }
             try db.create(virtualTable: "messages_fts", using: FTS5()) { t in
                 t.synchronize(withTable: "messages")
