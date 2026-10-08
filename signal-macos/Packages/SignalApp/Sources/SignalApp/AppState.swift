@@ -194,27 +194,20 @@ public final class AppState: ObservableObject {
         )
         let creds = try await registration.register(account: account, environment: netEnv)
 
-        let certFetcher = SenderCertFetcher(fetch: { [unauth] path in
-            let response = try await unauth.send(
-                ChatRequest(method: "GET", pathAndQuery: path, timeout: 30)
-            )
-            guard (200..<300).contains(response.status) else {
-                throw LinkRegistrationError.rejected(status: response.status)
-            }
-            struct CertJSON: Decodable {
-                let certificate: String
-            }
-            guard let json = try? JSONDecoder().decode(CertJSON.self, from: response.body),
-                  let bytes = Data(base64Encoded: json.certificate)
-            else {
-                throw LinkRegistrationError.invalidResponse
-            }
-            return bytes
-        })
-        let certs = SenderCertService(fetch: { try await certFetcher.fetchCertificate() })
-        let keyService = LivePreKeyService(keys: unauth)
-
+        // The delivery certificate needs device auth: it goes over the
+        // AUTHENTICATED chat socket (Desktop's getSenderCertificate has no
+        // unauthenticated option). The socket is connected below, before any
+        // send can ask for the certificate.
         let chat = ChatSession()
+        let certFetcher = SenderCertFetcher(send: { request in try await chat.send(request) })
+        let certs = SenderCertService(fetch: { try await certFetcher.fetchCertificate() })
+        // Prekey fetches fall back to the authenticated GET /v2/keys when
+        // we hold no access key for the recipient or it is refused.
+        let keyService = LivePreKeyService(
+            keys: unauth,
+            authenticatedSend: { request in try await chat.send(request) }
+        )
+
         let live = LiveTransport(
             messages: unauth,
             incoming: chat.incoming(),

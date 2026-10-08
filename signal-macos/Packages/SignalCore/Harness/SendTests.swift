@@ -5,6 +5,7 @@ import Foundation
 import GRDB
 import LibSignalClient
 import SignalCore
+import SignalLogging
 import SignalMessaging
 import SignalStorage
 import SwiftProtobuf
@@ -247,7 +248,9 @@ private func makeFixture(
     ownOther: [UInt32] = [1],
     knownProfileKey: Bool = true,
     presession: Bool = true,
-    script: [SubmitResult] = []
+    script: [SubmitResult] = [],
+    fetcher: ((FakeBundles) -> any PreKeyBundleFetching)? = nil,
+    certs: (any SenderCertProvider)? = nil
 ) throws -> SendFixture {
     let rig = try ReceiverRig(ourAci: ourAci, ourDevice: ourDeviceId)
     let ourProfileKey = Data((0..<32).map { UInt8($0) })
@@ -302,8 +305,8 @@ private func makeFixture(
         conversations: conversations,
         ourAci: ourAci,
         ourDeviceId: ourDeviceId,
-        certs: FakeCerts(first: cert, second: cert),
-        bundles: bundles,
+        certs: certs ?? FakeCerts(first: cert, second: cert),
+        bundles: fetcher?(bundles) ?? bundles,
         submitter: submitter
     )
     return SendFixture(
@@ -357,6 +360,11 @@ func runSendTests() async {
     testHTTPMapping()
     testLibsignalErrorMapping()
     testAuthenticatedBodyShape()
+    await testFirstContactWithoutProfileKeyUsesAuthenticatedFetch()
+    await testUnauthorizedAccessKeyFetchFallsBackToAuthenticated()
+    await testAuthenticatedFetchStatusMapping()
+    await testCertFetchFailureFallsBackAndLogs()
+    await testSenderCertFetcherRequestAndParsing()
 }
 
 // MARK: - Fan-out
@@ -925,5 +933,303 @@ private func testAuthenticatedBodyShape() {
         )
     } catch {
         check("SendTests.testAuthenticatedBodyShape", false, "\(error)")
+    }
+}
+
+// MARK: - Prekey fetch fallback (fix round A, F1)
+
+/// Scripted `UnauthKeysService`: replays the script (default: serve from
+/// `source`), recording the authorization of every call.
+final class FakeUnauthKeys: UnauthKeysService, @unchecked Sendable {
+    enum Step {
+        case unauthorized
+        case serve
+    }
+
+    private let lock = NSLock()
+    private var script: [Step]
+    private var auths = [String]()
+    private let source: FakeBundles
+
+    init(source: FakeBundles, script: [Step] = []) {
+        self.source = source
+        self.script = script
+    }
+
+    var callAuths: [String] {
+        lock.withLock { auths }
+    }
+
+    func getPreKeys(
+        for target: ServiceId,
+        device: DeviceSpecifier,
+        auth: UserBasedAuthorization
+    ) async throws -> (IdentityKey, [PreKeyBundle]) {
+        let step: Step = lock.withLock {
+            switch auth {
+            case .accessKey: auths.append("accessKey")
+            case .unrestrictedUnauthenticatedAccess: auths.append("unrestricted")
+            case .groupSend: auths.append("groupSend")
+            }
+            return script.isEmpty ? .serve : script.removeFirst()
+        }
+        if case .unauthorized = step {
+            throw SignalError.requestUnauthorized("scripted 401")
+        }
+        let aci = target.serviceIdString.lowercased()
+        var ids: [UInt32]?
+        if case .specificDevice(let id) = device {
+            ids = [UInt32(id.rawValue)]
+        }
+        let bundles = try await source.fetchBundles(for: aci, deviceIds: ids, accessKey: nil)
+        guard let first = bundles.first else {
+            throw SignalError.serviceIdNotFound("none")
+        }
+        return (first.identityKey, bundles)
+    }
+}
+
+/// The server side of `GET /v2/keys/{aci}/{device|*}`: serves the same
+/// bundles as JSON and records every request it sees.
+final class FakeKeysEndpoint: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen = [ChatRequest]()
+    private let source: FakeBundles
+    private let status: UInt16
+
+    init(source: FakeBundles, status: UInt16 = 200) {
+        self.source = source
+        self.status = status
+    }
+
+    var requests: [ChatRequest] {
+        lock.withLock { seen }
+    }
+
+    func send(_ request: ChatRequest) async throws -> (status: UInt16, body: Data) {
+        lock.withLock { seen.append(request) }
+        guard status == 200 else {
+            return (status, Data())
+        }
+        let parts = request.pathAndQuery.split(separator: "/").map(String.init)
+        // ["v2", "keys", aci, device]
+        let aci = parts[2]
+        let ids: [UInt32]? = parts[3] == "*" ? nil : [UInt32(parts[3])!]
+        let bundles = try await source.fetchBundles(for: aci, deviceIds: ids, accessKey: nil)
+        func key(_ id: UInt32, _ publicKey: Data, _ signature: Data? = nil) -> [String: Any] {
+            var out: [String: Any] = ["keyId": id, "publicKey": publicKey.base64EncodedString()]
+            if let signature {
+                out["signature"] = signature.base64EncodedString()
+            }
+            return out
+        }
+        let devices: [[String: Any]] = bundles.map { bundle in
+            var device: [String: Any] = [
+                "deviceId": bundle.deviceId,
+                "registrationId": bundle.registrationId,
+                "signedPreKey": key(
+                    bundle.signedPreKeyId,
+                    bundle.signedPreKeyPublic.serialize(),
+                    bundle.signedPreKeySignature
+                ),
+                "pqPreKey": key(
+                    bundle.kyberPreKeyId,
+                    bundle.kyberPreKeyPublic.serialize(),
+                    bundle.kyberPreKeySignature
+                ),
+            ]
+            if let id = bundle.preKeyId, let publicKey = bundle.preKeyPublic {
+                device["preKey"] = key(id, publicKey.serialize())
+            }
+            return device
+        }
+        let identity = bundles.first?.identityKey.serialize().base64EncodedString() ?? ""
+        let body = try JSONSerialization.data(
+            withJSONObject: ["identityKey": identity, "devices": devices]
+        )
+        return (200, body)
+    }
+}
+
+private func liveFetcher(
+    unauth: FakeUnauthKeys,
+    endpoint: FakeKeysEndpoint
+) -> any PreKeyBundleFetching {
+    LivePreKeyService(keys: unauth, authenticatedSend: { try await endpoint.send($0) })
+}
+
+// No profile key (the typical first contact): the prekey fetch goes straight
+// to the authenticated GET /v2/keys/{aci}/* and the send establishes
+// sessions with every device.
+private func testFirstContactWithoutProfileKeyUsesAuthenticatedFetch() async {
+    do {
+        let holder = Box<(FakeUnauthKeys, FakeKeysEndpoint)?>(nil)
+        let f = try makeFixture(unestablished: [], knownProfileKey: false, presession: false) { source in
+            let unauth = FakeUnauthKeys(source: source)
+            let endpoint = FakeKeysEndpoint(source: source)
+            holder.value = (unauth, endpoint)
+            return liveFetcher(unauth: unauth, endpoint: endpoint)
+        }
+        let (unauth, endpoint) = holder.value!
+        _ = try await f.sender.send(textContent("hello", 1_700_000_100_001), to: theirAci, timestamp: 1_700_000_100_001)
+        let requests = endpoint.requests
+        let active = try activeDevices(f)
+        try checkT(
+            "SendTests.testFirstContactWithoutProfileKeyUsesAuthenticatedFetch",
+            requests.count == 1 && requests[0].method == "GET"
+                && requests[0].pathAndQuery == "/v2/keys/\(theirAci)/*"
+                && unauth.callAuths.isEmpty
+                && active == [1, 2, 3]
+                && f.submitter.requests.count == 1
+                && f.submitter.requests[0].auth == .authenticated,
+            "requests=\(requests.map(\.pathAndQuery)) unauth=\(unauth.callAuths) active=\(active)"
+        )
+    } catch {
+        check("SendTests.testFirstContactWithoutProfileKeyUsesAuthenticatedFetch", false, "\(error)")
+    }
+}
+
+// Access key known but refused (401): exactly one unauthenticated try, then
+// exactly one authenticated fetch, and the session is established.
+private func testUnauthorizedAccessKeyFetchFallsBackToAuthenticated() async {
+    do {
+        let holder = Box<(FakeUnauthKeys, FakeKeysEndpoint)?>(nil)
+        let f = try makeFixture(unestablished: [], knownProfileKey: true, presession: false) { source in
+            let unauth = FakeUnauthKeys(source: source, script: [.unauthorized])
+            let endpoint = FakeKeysEndpoint(source: source)
+            holder.value = (unauth, endpoint)
+            return liveFetcher(unauth: unauth, endpoint: endpoint)
+        }
+        let (unauth, endpoint) = holder.value!
+        _ = try await f.sender.send(textContent("hello", 1_700_000_100_002), to: theirAci, timestamp: 1_700_000_100_002)
+        let active = try activeDevices(f)
+        try checkT(
+            "SendTests.testUnauthorizedAccessKeyFetchFallsBackToAuthenticated",
+            unauth.callAuths == ["accessKey"] && endpoint.requests.count == 1
+                && active == [1, 2, 3] && f.submitter.requests.count == 1,
+            "unauth=\(unauth.callAuths) auth=\(endpoint.requests.count) active=\(active)"
+        )
+
+        // And a 200 on the access-key path never touches the authenticated one.
+        let holder2 = Box<(FakeUnauthKeys, FakeKeysEndpoint)?>(nil)
+        let g = try makeFixture(unestablished: [], knownProfileKey: true, presession: false) { source in
+            let unauth = FakeUnauthKeys(source: source)
+            let endpoint = FakeKeysEndpoint(source: source)
+            holder2.value = (unauth, endpoint)
+            return liveFetcher(unauth: unauth, endpoint: endpoint)
+        }
+        let (unauth2, endpoint2) = holder2.value!
+        _ = try await g.sender.send(textContent("again", 1_700_000_100_003), to: theirAci, timestamp: 1_700_000_100_003)
+        try checkT(
+            "SendTests.testAccessKeyFetchPreferredWhenAccepted",
+            unauth2.callAuths == ["accessKey"] && endpoint2.requests.isEmpty
+        )
+    } catch {
+        check("SendTests.testUnauthorizedAccessKeyFetchFallsBackToAuthenticated", false, "\(error)")
+    }
+}
+
+private func testAuthenticatedFetchStatusMapping() async {
+    do {
+        let f = try makeFixture(knownProfileKey: false)
+        func outcome(_ status: UInt16) async -> SendError? {
+            let service = LivePreKeyService(
+                keys: FakeUnauthKeys(source: f.bundles),
+                authenticatedSend: { _ in (status, Data()) }
+            )
+            do {
+                _ = try await service.fetchBundles(for: theirAci, deviceIds: nil, accessKey: nil)
+                return nil
+            } catch {
+                return error as? SendError
+            }
+        }
+        let n404 = await outcome(404)
+        let n401 = await outcome(401)
+        let n500 = await outcome(500)
+        check(
+            "SendTests.testAuthenticatedFetchStatusMapping",
+            n404 == .unregisteredUser && n401 == .unauthorized && n500 == .server(status: 500),
+            "\(String(describing: n404)) \(String(describing: n401)) \(String(describing: n500))"
+        )
+    } catch {
+        check("SendTests.testAuthenticatedFetchStatusMapping", false, "\(error)")
+    }
+}
+
+// MARK: - Sender certificate (fix round A, F2)
+
+private struct CertBoom: Error {}
+
+private struct FailingCerts: SenderCertProvider {
+    func currentCertificate() async throws -> SenderCertificate {
+        throw CertBoom()
+    }
+
+    func refreshCertificate() async throws -> SenderCertificate {
+        throw CertBoom()
+    }
+}
+
+// A failed certificate fetch still sends (authenticated), but leaves a
+// redacted error-level log line: the error TYPE only, no identifiers.
+private func testCertFetchFailureFallsBackAndLogs() async {
+    do {
+        let before = LogStore.shared.entries().count
+        let f = try makeFixture(certs: FailingCerts())
+        _ = try await f.sender.send(textContent("x", 1_700_000_200_001), to: theirAci, timestamp: 1_700_000_200_001)
+        let request = f.submitter.requests[0]
+        let lines = LogStore.shared.entries().dropFirst(before).filter {
+            $0.subsystem == "send" && $0.level == .error && $0.message.contains("sender certificate unavailable")
+        }
+        try checkT(
+            "SendTests.testCertFetchFailureFallsBackAndLogs",
+            request.auth == .authenticated && request.messages.allSatisfy { $0.type != 6 }
+                && lines.count == 1 && lines[lines.startIndex].message.contains("CertBoom")
+                && !lines[lines.startIndex].message.contains(theirAci),
+            "lines=\(lines.map(\.message))"
+        )
+    } catch {
+        check("SendTests.testCertFetchFailureFallsBackAndLogs", false, "\(error)")
+    }
+}
+
+// The delivery certificate is fetched with GET on the AUTHENTICATED send
+// closure, and the response is {certificate: base64}.
+private func testSenderCertFetcherRequestAndParsing() async {
+    do {
+        let f = try makeFixture()
+        let cert = try senderCertificate(
+            rig: f.rig,
+            root: IdentityKeyPair.generate(),
+            server: IdentityKeyPair.generate()
+        )
+        let seen = Box<[ChatRequest]>([])
+        let body = try JSONSerialization.data(
+            withJSONObject: ["certificate": cert.serialize().base64EncodedString()]
+        )
+        let fetcher = SenderCertFetcher(send: { request in
+            seen.value.append(request)
+            return (200, body)
+        })
+        let fetched = try await fetcher.fetchCertificate()
+        let rejected = SenderCertFetcher(send: { _ in (401, Data()) })
+        var rejection: Error?
+        do {
+            _ = try await rejected.fetchCertificate()
+        } catch {
+            rejection = error
+        }
+        let requests = seen.value
+        try checkT(
+            "SendTests.testSenderCertFetcherRequestAndParsing",
+            requests.count == 1 && requests[0].method == "GET"
+                && requests[0].pathAndQuery == "/v1/certificate/delivery?includeE164=false"
+                && requests[0].pathAndQuery.hasPrefix("/v1/certificate/delivery")
+                && fetched.serialize() == cert.serialize()
+                && (rejection as? LinkRegistrationError) == .rejected(status: 401)
+        )
+    } catch {
+        check("SendTests.testSenderCertFetcherRequestAndParsing", false, "\(error)")
     }
 }

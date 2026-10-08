@@ -17,11 +17,38 @@ struct InboundContext {
     let envelopeHash: Data
 }
 
+/// A contact's profile key harvested from a message.
+struct HarvestedProfileKey {
+    let aci: String
+    let key: Data
+}
+
 /// Maps decrypted `Content` to the row Milestone A stores, or nil when the
 /// content produces no row (receipts, typing, null, calls, decryption
 /// errors, ...).
 enum ContentMapping {
     private static let logger = Logger(subsystem: "receive", category: "mapping")
+
+    /// The SENDER's profile key carried by an inbound dataMessage (Desktop's
+    /// `profileKeyHarvest`), whether or not the message produces a row (a
+    /// PROFILE_KEY_UPDATE does not). Only 32-byte keys, and never from a
+    /// sync transcript or from ourselves: those carry OUR key (Desktop
+    /// treats that as `profileSharing`, not as the recipient's key).
+    static func profileKey(
+        from content: SignalServiceProtos_Content,
+        context: InboundContext
+    ) -> HarvestedProfileKey? {
+        guard
+            case .dataMessage(let dataMessage)? = content.content,
+            dataMessage.hasProfileKey,
+            dataMessage.profileKey.count == 32,
+            !context.senderAci.isEmpty,
+            context.senderAci != context.ourAci
+        else {
+            return nil
+        }
+        return HarvestedProfileKey(aci: context.senderAci, key: dataMessage.profileKey)
+    }
 
     static func message(
         from content: SignalServiceProtos_Content,

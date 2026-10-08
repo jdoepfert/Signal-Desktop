@@ -440,7 +440,12 @@ public actor OutgoingSender {
                 do {
                     cert = try await certs.currentCertificate()
                 } catch {
-                    Self.logger.info("no sender certificate; sending authenticated")
+                    // Not silent: a persistent failure here (e.g. 401 from an
+                    // unauthenticated fetch) means sealed sender never works.
+                    // Error type only, no identifiers.
+                    Self.logger.error(
+                        "sender certificate unavailable (\(Self.reason(error))); sending authenticated"
+                    )
                     effectiveAuth = .authenticated
                 }
             }

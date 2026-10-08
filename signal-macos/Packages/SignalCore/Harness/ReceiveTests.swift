@@ -22,11 +22,11 @@ private func vectorCase(_ vectors: [String: Any], _ name: String) -> [String: An
     (vectors["cases"] as! [[String: Any]]).first { $0["name"] as? String == name }!
 }
 
-private func hexData(_ value: Any?) -> Data {
+func hexData(_ value: Any?) -> Data {
     Vectors.data(hex: value as! String)!
 }
 
-private func u64(_ value: Any?) -> UInt64 {
+func u64(_ value: Any?) -> UInt64 {
     (value as! NSNumber).uint64Value
 }
 
@@ -46,6 +46,9 @@ func runReceiveTests() async {
     await testReplayAttempts()
     await testNotAckedWhenNotStored()
     await testTransactionRollsBackStoreWrites()
+    await testInboundProfileKeyPersisted()
+    await testSyncTranscriptProfileKeyIgnored()
+    await testNon32ByteProfileKeyIgnored()
 }
 
 // Sealed-sender and PREKEY_MESSAGE vectors from Desktop's stack through the
@@ -159,7 +162,7 @@ private func testRetryDedupesBySentTimestamp() async {
 }
 
 /// Builds a Bob rig plus a peer whose first message is a PREKEY_MESSAGE.
-private func bobAndPeer(
+func bobAndPeer(
     peerAci: String = "aaaaaaaa-1111-4222-8333-444444444444",
     peerDevice: UInt32 = 1
 ) throws -> (rig: ReceiverRig, peer: TestPeer, trustRoot: IdentityKeyPair) {
@@ -170,7 +173,7 @@ private func bobAndPeer(
     return (rig, peer, IdentityKeyPair.generate())
 }
 
-private func prekeyEnvelope(
+func prekeyEnvelope(
     from peer: TestPeer,
     to rig: ReceiverRig,
     content: Data,
@@ -233,7 +236,7 @@ private func testUnsupportedPlaceholder() async {
     }
 }
 
-private func syncContent(destination: String, body: String, timestamp: UInt64) throws -> Data {
+func syncContent(destination: String, body: String, timestamp: UInt64) throws -> Data {
     var dataMessage = SignalServiceProtos_DataMessage()
     dataMessage.body = body
     dataMessage.timestamp = timestamp
@@ -608,5 +611,151 @@ private func testTransactionRollsBackStoreWrites() async {
         )
     } catch {
         check("ReceiveTests.testTransactionRollsBackStoreWrites", false, "\(error)")
+    }
+}
+
+// MARK: - Profile keys (fix round A, F1)
+
+private func contentWithProfileKey(
+    body: String?,
+    timestamp: UInt64,
+    profileKey: Data,
+    flags: UInt32? = nil
+) throws -> Data {
+    var dataMessage = SignalServiceProtos_DataMessage()
+    if let body {
+        dataMessage.body = body
+    }
+    dataMessage.timestamp = timestamp
+    dataMessage.profileKey = profileKey
+    if let flags {
+        dataMessage.flags = flags
+    }
+    var content = SignalServiceProtos_Content()
+    content.dataMessage = dataMessage
+    return try content.serializedData()
+}
+
+// The sender's profile key rides on their dataMessages (Desktop's
+// profileKeyHarvest) and must land in contacts.profile_key in the same
+// transaction, including on a PROFILE_KEY_UPDATE that produces no row.
+private func testInboundProfileKeyPersisted() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let contacts = ContactTable(queue: rig.db.queue)
+        let key = Data((0..<32).map { UInt8(200 - $0) })
+        let receiver = try rig.receiver(trustRoots: [])
+        let ts: UInt64 = 1_700_000_900_000
+        await receiver.process(AckCounter().envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try contentWithProfileKey(body: "hi", timestamp: ts, profileKey: key),
+                clientTimestamp: ts
+            )
+        ))
+        let afterText = try contacts.profileKey(aci: peer.aci)
+
+        // PROFILE_KEY_UPDATE (flag 4): no message row, key still stored.
+        let rotated = Data((0..<32).map { UInt8($0 + 1) })
+        await receiver.process(AckCounter().envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try contentWithProfileKey(
+                    body: nil,
+                    timestamp: ts + 1,
+                    profileKey: rotated,
+                    flags: 4
+                ),
+                clientTimestamp: ts + 1
+            )
+        ))
+        try checkT(
+            "ReceiveTests.testInboundProfileKeyPersisted",
+            afterText == key && (try contacts.profileKey(aci: peer.aci)) == rotated
+                && (try rig.messages.all()).count == 1 && (try rig.unprocessed.count()) == 0,
+            "afterText=\(String(describing: afterText))"
+        )
+    } catch {
+        check("ReceiveTests.testInboundProfileKeyPersisted", false, "\(error)")
+    }
+}
+
+// A sync transcript's dataMessage carries OUR profile key (it is what the
+// recipient would harvest), so it must never be stored as the DESTINATION
+// contact's key: Desktop treats it as profileSharing, not setProfileKey
+// (handleDataMessage.preload.ts:686-696). Same for a self-addressed message.
+private func testSyncTranscriptProfileKeyIgnored() async {
+    do {
+        let ownAci = "bbbbbbbb-1111-4222-8333-444444444444"
+        let rig = try ReceiverRig(ourAci: ownAci, ourDevice: 3)
+        try rig.provisionOwnKeys()
+        let primary = try TestPeer(aci: ownAci, deviceId: 1)
+        try primary.establish(with: rig.makeBundle(), recipient: rig.address)
+        let contacts = ContactTable(queue: rig.db.queue)
+        let destination = "cccccccc-1111-4222-8333-444444444444"
+        let ourKey = Data(repeating: 7, count: 32)
+        var dataMessage = SignalServiceProtos_DataMessage()
+        dataMessage.body = "from phone"
+        dataMessage.timestamp = 1_700_000_950_000
+        dataMessage.profileKey = ourKey
+        var sent = SignalServiceProtos_SyncMessage.Sent()
+        sent.destinationServiceID = destination
+        sent.timestamp = 1_700_000_950_000
+        sent.message = dataMessage
+        var sync = SignalServiceProtos_SyncMessage()
+        sync.sent = sent
+        var content = SignalServiceProtos_Content()
+        content.syncMessage = sync
+        let receiver = try rig.receiver(trustRoots: [])
+        await receiver.process(AckCounter().envelope(
+            try prekeyEnvelope(
+                from: primary,
+                to: rig,
+                content: try content.serializedData(),
+                clientTimestamp: 1_700_000_950_000
+            )
+        ))
+        try checkT(
+            "ReceiveTests.testSyncTranscriptProfileKeyIgnored",
+            (try rig.messages.all()).count == 1
+                && (try contacts.profileKey(aci: destination)) == nil
+                && (try contacts.profileKey(aci: ownAci)) == nil
+        )
+    } catch {
+        check("ReceiveTests.testSyncTranscriptProfileKeyIgnored", false, "\(error)")
+    }
+}
+
+private func testNon32ByteProfileKeyIgnored() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let contacts = ContactTable(queue: rig.db.queue)
+        let good = Data(repeating: 9, count: 32)
+        try contacts.setProfileKey(aci: peer.aci, profileKey: good)
+        let receiver = try rig.receiver(trustRoots: [])
+        var ts: UInt64 = 1_700_001_000_000
+        for length in [0, 16, 31, 33] {
+            ts += 1
+            await receiver.process(AckCounter().envelope(
+                try prekeyEnvelope(
+                    from: peer,
+                    to: rig,
+                    content: try contentWithProfileKey(
+                        body: "x",
+                        timestamp: ts,
+                        profileKey: Data(repeating: 1, count: length)
+                    ),
+                    clientTimestamp: ts
+                )
+            ))
+        }
+        try checkT(
+            "ReceiveTests.testNon32ByteProfileKeyIgnored",
+            (try contacts.profileKey(aci: peer.aci)) == good && (try rig.messages.all()).count == 4
+        )
+    } catch {
+        check("ReceiveTests.testNon32ByteProfileKeyIgnored", false, "\(error)")
     }
 }

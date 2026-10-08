@@ -182,7 +182,7 @@ public struct LinkedDeviceRegistration: Sendable {
         let bodyData = try JSONEncoder().encode(body)
         let basic = Data("\(aci):\(password)".utf8).base64EncodedString()
         let (status, responseBody) = try await transport.put(
-            path: "v1/devices/link",
+            path: "/v1/devices/link",
             headers: [
                 "Authorization": "Basic \(basic)",
                 "Content-Type": "application/json",

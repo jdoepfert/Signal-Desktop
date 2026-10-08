@@ -115,7 +115,7 @@ func runLinkedRegistrationTests() async {
         check("MessagingTests.testLinkedRegistrationStoresIdentityAndSignsPreKeys", signingOk && storedIdentityOk)
         check(
             "MessagingTests.testLinkedRegistration",
-            put.path == "v1/devices/link"
+            put.path == "/v1/devices/link"
                 && authPayload.hasPrefix("9d0652a3-dcc3-4d11-975f-74d61598733f:")
                 && (body?["verificationCode"] as? String) == "123-456"
                 && ((body?["aciSignedPreKey"] as? [String: Any])?["keyId"] as? Int) == 1

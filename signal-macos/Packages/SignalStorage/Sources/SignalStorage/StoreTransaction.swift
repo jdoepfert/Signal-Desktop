@@ -31,6 +31,25 @@ public final class StoreTransaction {
         try UnprocessedStore.remove(id: id, in: db)
     }
 
+    /// Stores a contact's profile key (used to derive their sealed-sender
+    /// access key). Keys that are not exactly 32 bytes are ignored, as is
+    /// anything that would store nothing new. Returns whether a key was
+    /// written.
+    @discardableResult
+    public func setProfileKey(aci: String, profileKey: Data) throws -> Bool {
+        guard profileKey.count == 32 else {
+            return false
+        }
+        try db.execute(
+            sql: """
+                INSERT INTO contacts (aci, profile_key) VALUES (?, ?)
+                ON CONFLICT(aci) DO UPDATE SET profile_key = excluded.profile_key
+                """,
+            arguments: [aci, profileKey]
+        )
+        return true
+    }
+
     /// Returns the id of the 1:1 conversation for `aci`, creating it.
     public func conversationId(forAci aci: String) throws -> String {
         try ConversationStore.fetchOrCreate(

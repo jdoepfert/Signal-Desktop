@@ -5,24 +5,43 @@ import Foundation
 import LibSignalClient
 import SignalCore
 
-/// Fetches the server-issued sender (delivery) certificate. The fetch
-/// closure performs GET `v1/certificate/delivery` (endpoint pinned from
-/// Desktop's `ts/textsecure/WebAPI.preload.ts`) and returns the raw
-/// certificate bytes (transport layer handles HTTP framing/base64).
+/// Fetches the server-issued sender (delivery) certificate:
+/// `GET /v1/certificate/delivery?includeE164=false` (Desktop
+/// `getSenderCertificate(omitE164: true)`, `ts/textsecure/WebAPI.preload.ts`).
+/// The endpoint requires DEVICE AUTH, so `send` must be the authenticated
+/// chat socket (`ChatSession.send`), never an unauthenticated connection.
 /// Caching lives in `SenderCertService`; this type is a stateless fetch.
 public struct SenderCertFetcher: Sendable {
-    public typealias Fetch = @Sendable (String) async throws -> Data
+    /// Sends one request over the authenticated chat socket.
+    public typealias Send = @Sendable (ChatRequest) async throws -> (status: UInt16, body: Data)
 
-    public static let deliveryEndpoint = "v1/certificate/delivery"
+    /// Path and query of the request. We never share a phone number, so the
+    /// certificate is requested without our E164.
+    public static let deliveryEndpoint = "/v1/certificate/delivery?includeE164=false"
 
-    private let fetch: Fetch
+    private let send: Send
 
-    public init(fetch: @escaping Fetch) {
-        self.fetch = fetch
+    public init(send: @escaping Send) {
+        self.send = send
+    }
+
+    private struct CertificateJSON: Decodable {
+        let certificate: String
     }
 
     public func fetchCertificate() async throws -> SenderCertificate {
-        let bytes = try await fetch(Self.deliveryEndpoint)
+        let response = try await send(
+            ChatRequest(method: "GET", pathAndQuery: Self.deliveryEndpoint, timeout: 30)
+        )
+        guard (200..<300).contains(response.status) else {
+            throw LinkRegistrationError.rejected(status: response.status)
+        }
+        guard
+            let json = try? JSONDecoder().decode(CertificateJSON.self, from: response.body),
+            let bytes = Data(base64Encoded: json.certificate)
+        else {
+            throw LinkRegistrationError.invalidResponse
+        }
         return try SenderCertificate(bytes)
     }
 

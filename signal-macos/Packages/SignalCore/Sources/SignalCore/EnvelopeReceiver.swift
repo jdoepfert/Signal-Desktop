@@ -38,6 +38,12 @@ public struct ReceivedMessage: Sendable, Equatable {
     public let isOutgoing: Bool
 }
 
+/// What one envelope yielded inside the receive transaction.
+private struct DecodedEnvelope {
+    let message: NewMessage?
+    let profileKey: HarvestedProfileKey?
+}
+
 public enum EnvelopeError: Error, Equatable {
     case invalidEnvelope
     case missingSource
@@ -165,8 +171,12 @@ public actor EnvelopeReceiver {
         }
         do {
             let committed: ReceivedMessage? = try store.withTransaction { transaction in
-                let incoming = try decode(bytes)
+                let decoded = try decode(bytes)
+                let incoming = decoded.message
                 var result: ReceivedMessage?
+                if let harvested = decoded.profileKey {
+                    try transaction.setProfileKey(aci: harvested.aci, profileKey: harvested.key)
+                }
                 if let message = incoming {
                     let persisted = try messages.persist(message, in: transaction)
                     if persisted.inserted {
@@ -202,7 +212,7 @@ public actor EnvelopeReceiver {
 
     /// Decrypts and maps one envelope. Runs INSIDE the store transaction:
     /// every store callback libsignal makes lands in it.
-    private func decode(_ bytes: Data) throws -> NewMessage? {
+    private func decode(_ bytes: Data) throws -> DecodedEnvelope {
         let envelope: SignalServiceProtos_Envelope
         do {
             envelope = try SignalServiceProtos_Envelope(serializedBytes: bytes)
@@ -210,7 +220,7 @@ public actor EnvelopeReceiver {
             throw EnvelopeError.invalidEnvelope
         }
         if envelope.type == .serverDeliveryReceipt {
-            return nil
+            return DecodedEnvelope(message: nil, profileKey: nil)
         }
         if envelope.hasDestinationServiceID,
            envelope.destinationServiceID.lowercased() != ourAci
@@ -278,15 +288,16 @@ public actor EnvelopeReceiver {
         } catch {
             throw EnvelopeError.invalidContent
         }
-        return ContentMapping.message(
-            from: content,
-            context: InboundContext(
-                senderAci: senderAci,
-                senderDevice: senderDevice,
-                ourAci: ourAci,
-                clientTimestamp: envelope.clientTimestamp,
-                envelopeHash: Data(SHA256.hash(data: bytes))
-            )
+        let inbound = InboundContext(
+            senderAci: senderAci,
+            senderDevice: senderDevice,
+            ourAci: ourAci,
+            clientTimestamp: envelope.clientTimestamp,
+            envelopeHash: Data(SHA256.hash(data: bytes))
+        )
+        return DecodedEnvelope(
+            message: ContentMapping.message(from: content, context: inbound),
+            profileKey: ContentMapping.profileKey(from: content, context: inbound)
         )
     }
 
