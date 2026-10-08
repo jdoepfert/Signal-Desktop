@@ -31,9 +31,9 @@ public final class SearchService: Sendable {
             let fts = try StoredMessage.fetchAll(
                 db,
                 sql: """
-                    SELECT m.id, m.sender_aci, m.body, m.timestamp FROM messages_fts
+                    SELECT m.id, m.sender_aci, m.body, m.sent_timestamp FROM messages_fts
                     JOIN messages m ON m.id = messages_fts.rowid
-                    WHERE messages_fts MATCH ? ORDER BY m.timestamp DESC, m.id DESC
+                    WHERE messages_fts MATCH ? ORDER BY m.sent_timestamp DESC, m.id DESC
                     LIMIT \(Self.limit)
                     """,
                 arguments: [match]
@@ -41,12 +41,12 @@ public final class SearchService: Sendable {
             let named = try StoredMessage.fetchAll(
                 db,
                 sql: """
-                    SELECT m.id, m.sender_aci, m.body, m.timestamp FROM messages m
+                    SELECT m.id, m.sender_aci, m.body, m.sent_timestamp FROM messages m
                     WHERE m.sender_aci IN (
                         SELECT aci FROM contacts
                         WHERE name LIKE ? ESCAPE '\\' OR profile_name LIKE ? ESCAPE '\\'
                     )
-                    ORDER BY m.timestamp DESC, m.id DESC LIMIT \(Self.limit)
+                    ORDER BY m.sent_timestamp DESC, m.id DESC LIMIT \(Self.limit)
                     """,
                 arguments: [like, like]
             )

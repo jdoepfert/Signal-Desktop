@@ -1,11 +1,6 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-#if canImport(CryptoKit)
-import CryptoKit
-#else
-import Crypto
-#endif
 import Foundation
 import LibSignalClient
 import SignalLogging
@@ -85,7 +80,7 @@ public enum MessagePipeError: Error, Equatable {
 /// pipe's job (see `MessagePipe.sendText`).
 public protocol SealedMessageTransport: Sendable {
     func send(_ envelope: OutboundEnvelope, to recipientAci: String) async throws
-    func incomingEnvelopes() -> AsyncStream<Data>
+    func incomingEnvelopes() -> AsyncStream<IncomingEnvelope>
 }
 
 /// One per-device sealed envelope plus its routing metadata.
@@ -119,27 +114,28 @@ extension InMemorySignalProtocolStore: @retroactive @unchecked Sendable {}
 /// uses `GRDBProtocolStore`.
 extension InMemorySignalProtocolStore: @retroactive SignalProtocolStore {}
 
-/// 1:1 sealed-sender message pipe: encrypting send with single cert-rotation
-/// retry, decrypting receive mapped to `DecryptedMessage`.
+/// 1:1 sealed-sender message pipe. Sending: encrypting send with single
+/// cert-rotation retry. Receiving: hands every incoming envelope to the
+/// `EnvelopeReceiver` (which stores, acks, decrypts and persists); the pipe
+/// itself no longer decodes anything.
 public actor MessagePipe {
     private let transport: any SealedMessageTransport
     private let certs: any SenderCertProvider
     private let store: any SignalProtocolStore
+    // Kept for the send path (Task 5 reworks sealed-sender sends).
     private let ourAddress: ProtocolAddress
     private let trustRoots: [PublicKey]
-    private let source: AsyncStream<Data>?
-    private let messages: MessageStore?
+    private let source: AsyncStream<IncomingEnvelope>?
+    private let receiver: EnvelopeReceiver?
     private let devicesForRecipient:
         (@Sendable (String) async throws -> [(deviceId: UInt32, registrationId: UInt32)])?
-    private let stream: AsyncStream<DecryptedMessage>
-    private let continuation: AsyncStream<DecryptedMessage>.Continuation
+    private let empty: AsyncStream<ReceivedMessage>
     private var pumpTask: Task<Void, Never>?
 
+    /// - Parameter receiver: handles inbound envelopes. Without one the
+    ///   pipe only sends.
     /// - Parameter incomingSource: test seam; defaults to the transport's
     ///   live envelope stream.
-    /// - Parameter messages: when present, inbound messages persist here and
-    ///   duplicates (same sender + timestamp) are stored — and yielded —
-    ///   once.
     /// - Parameter devicesForRecipient: device fanout provider; defaults to
     ///   the single requested device (legacy/test behavior). Live wiring
     ///   passes session-backed enumeration.
@@ -149,8 +145,8 @@ public actor MessagePipe {
         store: any SignalProtocolStore,
         ourAddress: ProtocolAddress,
         trustRoots: [PublicKey],
-        incomingSource: AsyncStream<Data>? = nil,
-        messages: MessageStore? = nil,
+        receiver: EnvelopeReceiver? = nil,
+        incomingSource: AsyncStream<IncomingEnvelope>? = nil,
         devicesForRecipient: (@Sendable (String) async throws -> [(deviceId: UInt32, registrationId: UInt32)])? = nil
     ) {
         self.transport = transport
@@ -158,24 +154,28 @@ public actor MessagePipe {
         self.store = store
         self.ourAddress = ourAddress
         self.trustRoots = trustRoots
+        self.receiver = receiver
         self.source = incomingSource
-        self.messages = messages
         self.devicesForRecipient = devicesForRecipient
-        var continuation: AsyncStream<DecryptedMessage>.Continuation!
-        self.stream = AsyncStream { continuation = $0 }
-        self.continuation = continuation
+        self.empty = AsyncStream { $0.finish() }
     }
 
     public func start() {
-        guard pumpTask == nil else {
+        guard pumpTask == nil, let receiver else {
             return
         }
         let source = self.source ?? transport.incomingEnvelopes()
-        pumpTask = Task { await self.pump(source: source) }
+        pumpTask = Task {
+            for await envelope in source {
+                await receiver.process(envelope)
+            }
+            await receiver.finish()
+        }
     }
 
-    public nonisolated func incoming() -> AsyncStream<DecryptedMessage> {
-        stream
+    /// Newly committed inbound messages (from the receiver).
+    public nonisolated func incoming() -> AsyncStream<ReceivedMessage> {
+        receiver?.received ?? empty
     }
 
     /// Sends `text` to `recipientAci`. `deviceId` is server-provided in
@@ -241,56 +241,5 @@ public actor MessagePipe {
             senderStore: store,
             context: NullContext()
         )
-    }
-
-    private func pump(source: AsyncStream<Data>) async {
-        for await envelope in source {
-            do {
-                let message = try Self.decode(
-                    envelope,
-                    store: store,
-                    ourAddress: ourAddress,
-                    trustRoots: trustRoots
-                )
-                if let messages {
-                    let (_, inserted) = try messages.save(
-                        senderAci: message.senderAci,
-                        body: message.body,
-                        timestamp: message.timestamp,
-                        envelopeHash: Data(SHA256.hash(data: envelope))
-                    )
-                    guard inserted else {
-                        continue
-                    }
-                }
-                continuation.yield(message)
-            } catch {
-                Logger(subsystem: "pipe", category: "receive")
-                    .error("dropping undecodable inbound message")
-                continue
-            }
-        }
-        continuation.finish()
-    }
-
-    private static func decode(
-        _ envelope: Data,
-        store: any SignalProtocolStore,
-        ourAddress: ProtocolAddress,
-        trustRoots: [PublicKey]
-    ) throws -> DecryptedMessage {
-        let (plaintext, senderAci): (Data, String)
-        do {
-            (plaintext, senderAci) = try sealedSenderDecryptUnknownSender(
-                envelope,
-                to: ourAddress,
-                recipientStore: store,
-                trustRoots: trustRoots,
-                context: NullContext()
-            )
-        } catch {
-            throw MessagePipeError.invalidEnvelope
-        }
-        return try decodeContentMessage(plaintext, senderAci: senderAci)
     }
 }

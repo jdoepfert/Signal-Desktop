@@ -14,6 +14,7 @@ import SignalStorage
 private struct LiveStack {
     let database: SignalDatabase
     let pipe: MessagePipe
+    let receiver: EnvelopeReceiver
     let chat: ChatSession
     let conversations: ConversationStore
     let contacts: ContactStore
@@ -227,20 +228,32 @@ public final class AppState: ObservableObject {
         let chat = ChatSession()
         let live = LiveTransport(messages: unauth, incoming: chat.incoming())
         let messages = MessageStore(queue: database.queue)
+        let trustRoots = TrustRoots.forEnvironment(environment)
+        let receiver = try EnvelopeReceiver(
+            store: protocolStore,
+            unprocessed: UnprocessedStore(queue: database.queue),
+            messages: messages,
+            ourAci: creds.aci,
+            ourDeviceId: creds.deviceId,
+            trustRoots: trustRoots
+        )
         let pipe = MessagePipe(
             transport: live,
             certs: certs,
             store: protocolStore,
             ourAddress: try ProtocolAddress(name: creds.aci, deviceId: creds.deviceId),
-            trustRoots: TrustRoots.forEnvironment(environment),
+            trustRoots: trustRoots,
+            receiver: receiver,
             incomingSource: nil,
-            messages: messages,
             devicesForRecipient: { recipient in
                 try await sessions.ensureAllSessions(with: recipient).map { device in
                     (deviceId: device.deviceId, registrationId: device.registrationId)
                 }
             }
         )
+        // Envelopes acked last session but not yet committed replay BEFORE
+        // the socket opens, so they land ahead of anything new.
+        await receiver.replayUnprocessed()
         try await chat.connect(credentials: creds)
         let conversations = ConversationStore(queue: database.queue)
         let contacts = ContactStore(
@@ -250,6 +263,7 @@ public final class AppState: ObservableObject {
         stack = LiveStack(
             database: database,
             pipe: pipe,
+            receiver: receiver,
             chat: chat,
             conversations: conversations,
             contacts: contacts,
@@ -273,23 +287,28 @@ public final class AppState: ObservableObject {
         }
         for await message in stack.pipe.incoming() {
             do {
-                let conversation = try stack.conversations.conversation(forAci: message.senderAci)
-                // Inbound saves land unscoped (the pipe knows no thread);
-                // link them here so thread-scoped paging sees them.
-                try stack.messages.link(
-                    senderAci: message.senderAci,
-                    timestamp: message.timestamp,
-                    conversationId: conversation.id
-                )
-                try stack.conversations.touch(conversation.id, timestamp: message.timestamp)
-                try stack.conversations.incrementUnread(conversation.id)
+                // The receiver already committed the row, the conversation
+                // link, recency and unread count in the decrypt transaction.
                 refreshConversations()
+                guard let conversation = conversations.first(where: { $0.id == message.conversationId })
+                else {
+                    continue
+                }
                 if selection == conversation.id {
-                    try stack.conversations.markRead(conversation.id)
+                    if !message.isOutgoing {
+                        try stack.conversations.markRead(conversation.id)
+                    }
                     refreshConversations()
                     await reloadThread()
-                } else {
-                    await deliverNotification(message: message, conversation: conversation)
+                } else if !message.isOutgoing {
+                    await deliverNotification(
+                        message: DecryptedMessage(
+                            senderAci: message.senderAci,
+                            body: message.body,
+                            timestamp: message.timestamp
+                        ),
+                        conversation: conversation
+                    )
                 }
             } catch {
                 self.error = String(describing: error)

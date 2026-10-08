@@ -24,3 +24,10 @@ func checkResult() -> Int32 {
     }
     return checkFailures == 0 ? 0 : 1
 }
+
+/// `check` for conditions that can throw (store reads); a throw propagates
+/// to the caller's `catch`, which reports the failure.
+func checkT(_ name: String, _ condition: @autoclosure () throws -> Bool, _ message: String = "") throws {
+    let value = try condition()
+    check(name, value, message)
+}

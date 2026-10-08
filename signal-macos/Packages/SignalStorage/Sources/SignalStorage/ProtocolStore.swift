@@ -20,6 +20,9 @@ public final class GRDBProtocolStore: SignalProtocolStore, Sendable {
     private let session: GRDBSessionStore
     private let senderKeys: GRDBSenderKeyStore
 
+    /// All three stores must be built over the SAME `DatabaseQueue`:
+    /// `withTransaction` opens the transaction on the session store's queue
+    /// and expects identity and sender-key callbacks to join it.
     public init(
         identity: GRDBIdentityStore,
         session: GRDBSessionStore,
@@ -28,6 +31,16 @@ public final class GRDBProtocolStore: SignalProtocolStore, Sendable {
         self.identity = identity
         self.session = session
         self.senderKeys = senderKeys
+    }
+
+    /// Runs `body` in ONE write transaction. Every libsignal store callback
+    /// issued on this thread inside `body` (session, prekey, kyber, identity,
+    /// sender-key reads and writes) uses that transaction, so those writes
+    /// and whatever `body` writes through the `StoreTransaction` commit
+    /// together, or, if `body` throws, not at all. `body` must be
+    /// synchronous: the transaction is bound to the executing thread.
+    public func withTransaction<T>(_ body: (StoreTransaction) throws -> T) throws -> T {
+        try ActiveTransaction.write(session.queue, body)
     }
 
     public func identityKeyPair(context: StoreContext) throws -> IdentityKeyPair {

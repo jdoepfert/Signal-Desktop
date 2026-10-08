@@ -226,19 +226,22 @@ func runSameKeyConcurrencyTests() async {
         check("StorageTests.testSameMessageConcurrent", false, "\(error)")
     }
 
-    // Distinct envelopes sharing a millisecond stay distinct.
+    // A message is identified by (sender, sent timestamp) alone (schema
+    // v6): a retry with different bytes is the same message, while the same
+    // timestamp from another sender is distinct.
     do {
         let db = try SignalDatabase.open(path: nil, key: "k")
         let messages = MessageStore(queue: db.queue)
         let first = try messages.save(senderAci: "a", body: "x", timestamp: 1, envelopeHash: Data([1]))
-        let second = try messages.save(senderAci: "a", body: "y", timestamp: 1, envelopeHash: Data([2]))
-        let again = try messages.save(senderAci: "a", body: "x", timestamp: 1, envelopeHash: Data([1]))
+        let retry = try messages.save(senderAci: "a", body: "x", timestamp: 1, envelopeHash: Data([2]))
+        let other = try messages.save(senderAci: "b", body: "x", timestamp: 1, envelopeHash: Data([1]))
         check(
-            "StorageTests.testSameMillisecondDistinct",
-            first.inserted && second.inserted && !again.inserted && again.rowId == first.rowId
+            "StorageTests.testSentTimestampIsIdentity",
+            first.inserted && !retry.inserted && retry.rowId == first.rowId
+                && other.inserted && other.rowId != first.rowId
         )
     } catch {
-        check("StorageTests.testSameMillisecondDistinct", false, "\(error)")
+        check("StorageTests.testSentTimestampIsIdentity", false, "\(error)")
     }
 
     // Same key written concurrently: all succeed, last writer wins visibly.

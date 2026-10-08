@@ -8,7 +8,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 5
+    public static let currentVersion = 6
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -135,6 +135,88 @@ public enum MigrationChain {
             }
             try db.execute(sql: "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
         }
+        migrator.registerMigration("v6-milestone-a") { db in
+            // Raw envelopes persisted before ack; removed in the same
+            // transaction that commits the decrypted message.
+            try db.create(table: "unprocessed") { t in
+                t.column("id", .text).primaryKey()
+                t.column("envelope", .blob).notNull()
+                t.column("server_guid", .text)
+                t.column("received_at", .integer).notNull()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+            }
+
+            // Rebuild messages: dedupe key becomes (sender_aci,
+            // sent_timestamp), `timestamp` is renamed `sent_timestamp`,
+            // `envelope_hash` stays as a plain column. If v5 data holds two
+            // rows with the same (sender, timestamp) but different hashes
+            // (the old key allowed it), the lowest id wins.
+            try db.drop(table: "messages_fts")
+            try db.create(table: "messages_new") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("sender_aci", .text).notNull()
+                t.column("sender_device", .integer)
+                t.column("body", .text).notNull()
+                t.column("sent_timestamp", .integer).notNull()
+                t.column("conversation_id", .text)
+                t.column("envelope_hash", .blob)
+                t.column("expire_timer", .integer)
+                t.column("expires_at", .integer)
+                // text | unsupported | sent-sync
+                t.column("kind", .text).notNull().defaults(to: "text")
+                // NULL = inbound; pending | sent | failed = outbound.
+                t.column("status", .text)
+                t.uniqueKey(["sender_aci", "sent_timestamp"])
+            }
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO messages_new
+                    (id, sender_aci, body, sent_timestamp, conversation_id, envelope_hash)
+                SELECT id, sender_aci, body, timestamp, conversation_id, envelope_hash
+                FROM messages ORDER BY id
+                """)
+            // Rows saved before conversations were resolved: link them to
+            // their sender's 1:1 conversation (creating it when missing).
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO conversations (id, kind)
+                SELECT DISTINCT 'aci:' || sender_aci, 'direct' FROM messages_new
+                WHERE conversation_id IS NULL
+                """)
+            try db.execute(sql: """
+                UPDATE messages_new SET conversation_id = 'aci:' || sender_aci
+                WHERE conversation_id IS NULL
+                """)
+            try db.drop(table: "messages")
+            try db.rename(table: "messages_new", to: "messages")
+            try db.create(
+                index: "messages_conversation",
+                on: "messages",
+                columns: ["conversation_id", "sent_timestamp"]
+            )
+            try db.create(virtualTable: "messages_fts", using: FTS5()) { t in
+                t.synchronize(withTable: "messages")
+                t.column("body")
+            }
+            try db.execute(sql: "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+
+            try db.alter(table: "conversations") { t in
+                t.add(column: "expire_timer", .integer)
+                t.add(column: "expire_timer_version", .integer)
+            }
+            try db.alter(table: "contacts") { t in
+                t.add(column: "profile_key", .blob)
+            }
+        }
         return migrator
+    }
+
+    /// Migrates `queue` to the current version.
+    public static func migrate(_ queue: DatabaseQueue) throws {
+        try migrator().migrate(queue)
+    }
+
+    /// Test seam: migrates `queue` only up to and including the named
+    /// migration (e.g. to build a fixture at an older schema version).
+    public static func migrate(_ queue: DatabaseQueue, through name: String) throws {
+        try migrator().migrate(queue, upTo: name)
     }
 }

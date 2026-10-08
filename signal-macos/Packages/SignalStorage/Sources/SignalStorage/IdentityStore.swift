@@ -81,7 +81,7 @@ public final class GRDBIdentityStore: IdentityKeyStore, AccountIdentityStoring, 
         pniRegistrationId: UInt32? = nil,
         profileKey: Data? = nil
     ) throws {
-        try queue.write { db in
+        try queue.scopedWrite { db in
             func set(_ key: String, _ value: Data) throws {
                 try db.execute(
                     sql: "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
@@ -130,7 +130,7 @@ public final class GRDBIdentityStore: IdentityKeyStore, AccountIdentityStoring, 
         // Single write transaction: the read and the upsert must be atomic
         // or concurrent saves can both observe the same "old" key and
         // misreport the TOFU change signal.
-        try queue.write { db in
+        try queue.scopedWrite { db in
             let old: IdentityKey? = try {
                 guard
                     let row: Data = try Data.fetchOne(
@@ -174,7 +174,7 @@ public final class GRDBIdentityStore: IdentityKeyStore, AccountIdentityStoring, 
     ) throws -> IdentityKey? {
         let key = Self.addressKey(address)
         guard
-            let row: Data = try queue.read({ db in
+            let row: Data = try queue.scopedRead({ db in
                 try Data.fetchOne(
                     db,
                     sql: "SELECT public_key FROM identities WHERE address = ?",
@@ -192,7 +192,7 @@ public final class GRDBIdentityStore: IdentityKeyStore, AccountIdentityStoring, 
     }
 
     private func kvGet(_ key: String) throws -> Data? {
-        try queue.read { db in
+        try queue.scopedRead { db in
             try Data.fetchOne(db, sql: "SELECT value FROM kv WHERE key = ?", arguments: [key])
         }
     }

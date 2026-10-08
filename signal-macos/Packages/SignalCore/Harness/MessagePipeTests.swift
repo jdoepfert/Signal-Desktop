@@ -21,7 +21,7 @@ final class FakeChatTransport: SealedMessageTransport, @unchecked Sendable {
         sentEnvelopes.append(envelope.bytes)
     }
 
-    func incomingEnvelopes() -> AsyncStream<Data> {
+    func incomingEnvelopes() -> AsyncStream<IncomingEnvelope> {
         AsyncStream { _ in }
     }
 }
@@ -183,46 +183,46 @@ struct PipeFixture {
 }
 
 func runMessagePipeTests() async {
-    // Inbound: sealed envelope -> DecryptedMessage("hello-spike").
+    // Inbound: sealed envelope -> receiver -> ReceivedMessage("hello-spike").
     do {
-        let fixture = try PipeFixture.make()
-        let context = NullContext()
-        let content = try makeTextContent(body: "hello-spike", timestamp: 12345)
-            .serializedData()
-        let envelope = try sealedSenderEncrypt(
-            content,
-            from: fixture.senderCert,
-            to: fixture.bobAddress,
-            senderStore: fixture.aliceStore,
-            context: context
+        let rig = try ReceiverRig(ourAci: pipeBob, ourDevice: 1)
+        try rig.provisionOwnKeys()
+        let alice = try TestPeer(aci: pipeAlice, deviceId: 1)
+        try alice.establish(with: rig.makeBundle(), recipient: rig.address)
+        let root = IdentityKeyPair.generate()
+        let envelope = try sealedEnvelope(
+            from: alice,
+            to: rig,
+            content: try dataContent(body: "hello-spike", timestamp: 12345),
+            clientTimestamp: 12345,
+            root: root,
+            server: IdentityKeyPair.generate()
         )
-
-        let (stream, continuation) = AsyncStream<Data>.makeStream()
-        let transport = FakeChatTransport()
-        let certs = FakeCerts(first: fixture.senderCert, second: fixture.senderCert)
+        let (stream, continuation) = AsyncStream<IncomingEnvelope>.makeStream()
         let pipe = MessagePipe(
-            transport: transport,
-            certs: certs,
-            store: fixture.bobStore,
-            ourAddress: fixture.bobAddress,
-            trustRoots: [fixture.trustRoot],
+            transport: FakeChatTransport(),
+            certs: FakeCerts(
+                first: try PipeFixture.make().senderCert,
+                second: try PipeFixture.make().senderCert
+            ),
+            store: rig.store,
+            ourAddress: rig.address,
+            trustRoots: [root.publicKey],
+            receiver: try rig.receiver(trustRoots: [root.publicKey]),
             incomingSource: stream
         )
         await pipe.start()
-        continuation.yield(envelope)
+        continuation.yield(IncomingEnvelope(bytes: envelope, ack: {}))
         continuation.finish()
 
-        var received: DecryptedMessage?
+        var received: ReceivedMessage?
         for await message in pipe.incoming() {
             received = message
         }
         check(
             "MessagePipeTests.testDecryptKnownEnvelope",
-            received == DecryptedMessage(
-                senderAci: pipeAlice,
-                body: "hello-spike",
-                timestamp: 12345
-            )
+            received?.senderAci == pipeAlice && received?.body == "hello-spike"
+                && received?.timestamp == 12345 && received?.kind == "text"
         )
     } catch {
         check("MessagePipeTests.testDecryptKnownEnvelope", false, "\(error)")

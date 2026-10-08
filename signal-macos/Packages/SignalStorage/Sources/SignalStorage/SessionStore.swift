@@ -11,7 +11,7 @@ import LibSignalClient
 public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStore,
     KyberPreKeyStore, Sendable
 {
-    private let queue: DatabaseQueue
+    let queue: DatabaseQueue
 
     public init(queue: DatabaseQueue) {
         self.queue = queue
@@ -24,7 +24,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
         context: StoreContext
     ) throws -> SessionRecord? {
         guard
-            let row: Data = try queue.read({ db in
+            let row: Data = try queue.scopedRead({ db in
                 try Data.fetchOne(
                     db,
                     sql: "SELECT record FROM sessions WHERE address = ?",
@@ -54,7 +54,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
         for address: ProtocolAddress,
         context: StoreContext
     ) throws {
-        try queue.write { db in
+        try queue.scopedWrite { db in
             try db.execute(
                 sql: "INSERT OR REPLACE INTO sessions (address, record) VALUES (?, ?)",
                 arguments: [Self.addressKey(address), record.serialize()]
@@ -66,7 +66,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
 
     public func loadPreKey(id: UInt32, context: StoreContext) throws -> PreKeyRecord {
         guard
-            let row: Data = try queue.read({ db in
+            let row: Data = try queue.scopedRead({ db in
                 try Data.fetchOne(
                     db,
                     sql: "SELECT record FROM prekeys WHERE id = ?",
@@ -80,7 +80,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
     }
 
     public func storePreKey(_ record: PreKeyRecord, id: UInt32, context: StoreContext) throws {
-        try queue.write { db in
+        try queue.scopedWrite { db in
             try db.execute(
                 sql: "INSERT OR REPLACE INTO prekeys (id, record) VALUES (?, ?)",
                 arguments: [id, record.serialize()]
@@ -89,7 +89,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
     }
 
     public func removePreKey(id: UInt32, context: StoreContext) throws {
-        try queue.write { db in
+        try queue.scopedWrite { db in
             try db.execute(sql: "DELETE FROM prekeys WHERE id = ?", arguments: [id])
         }
     }
@@ -98,7 +98,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
 
     public func loadSignedPreKey(id: UInt32, context: StoreContext) throws -> SignedPreKeyRecord {
         guard
-            let row: Data = try queue.read({ db in
+            let row: Data = try queue.scopedRead({ db in
                 try Data.fetchOne(
                     db,
                     sql: "SELECT record FROM signed_prekeys WHERE id = ?",
@@ -116,7 +116,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
         id: UInt32,
         context: StoreContext
     ) throws {
-        try queue.write { db in
+        try queue.scopedWrite { db in
             try db.execute(
                 sql: "INSERT OR REPLACE INTO signed_prekeys (id, record) VALUES (?, ?)",
                 arguments: [id, record.serialize()]
@@ -128,7 +128,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
 
     public func loadKyberPreKey(id: UInt32, context: StoreContext) throws -> KyberPreKeyRecord {
         guard
-            let row: Data = try queue.read({ db in
+            let row: Data = try queue.scopedRead({ db in
                 try Data.fetchOne(
                     db,
                     sql: "SELECT record FROM kyber_prekeys WHERE id = ?",
@@ -146,7 +146,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
         id: UInt32,
         context: StoreContext
     ) throws {
-        try queue.write { db in
+        try queue.scopedWrite { db in
             try db.execute(
                 sql: "INSERT OR REPLACE INTO kyber_prekeys (id, record) VALUES (?, ?)",
                 arguments: [id, record.serialize()]
@@ -163,7 +163,7 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
         // Single statement: duplicates hit the PK and change nothing, which
         // the row count reports deterministically (no error-code sniffing,
         // no check-then-insert race on the serialized queue).
-        let changed = try queue.write { db -> Int in
+        let changed = try queue.scopedWrite { db -> Int in
             try db.execute(
                 sql: """
                     INSERT INTO kyber_base_keys (kyber_id, signed_id, base_key)

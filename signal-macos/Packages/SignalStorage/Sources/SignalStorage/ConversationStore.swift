@@ -53,8 +53,7 @@ public final class ConversationStore: Sendable {
     }
 
     public func conversation(forGroup masterKey: Data) throws -> StoredConversation {
-        let hex = masterKey.map { String(format: "%02x", $0) }.joined()
-        return try fetchOrCreate(id: "group:\(hex)", kind: "group", name: nil)
+        try fetchOrCreate(id: Self.groupId(masterKey), kind: "group", name: nil)
     }
 
     public func allConversations() throws -> [StoredConversation] {
@@ -105,30 +104,43 @@ public final class ConversationStore: Sendable {
         }
     }
 
+    static func groupId(_ masterKey: Data) -> String {
+        "group:" + masterKey.map { String(format: "%02x", $0) }.joined()
+    }
+
     private func fetchOrCreate(id: String, kind: String, name: String?) throws -> StoredConversation {
         try queue.write { db in
-            if let existing = try StoredConversation.fetchOne(
-                db,
-                sql: """
-                    SELECT id, kind, name, unread, muted, last_message_ts
-                    FROM conversations WHERE id = ?
-                    """,
-                arguments: [id]
-            ) {
-                return existing
-            }
-            try db.execute(
-                sql: "INSERT INTO conversations (id, kind, name) VALUES (?, ?, ?)",
-                arguments: [id, kind, name]
-            )
-            return StoredConversation(
-                id: id,
-                kind: kind,
-                name: name,
-                unread: 0,
-                muted: false,
-                lastMessageTs: 0
-            )
+            try Self.fetchOrCreate(id: id, kind: kind, name: name, in: db)
         }
+    }
+
+    static func fetchOrCreate(
+        id: String,
+        kind: String,
+        name: String?,
+        in db: Database
+    ) throws -> StoredConversation {
+        if let existing = try StoredConversation.fetchOne(
+            db,
+            sql: """
+                SELECT id, kind, name, unread, muted, last_message_ts
+                FROM conversations WHERE id = ?
+                """,
+            arguments: [id]
+        ) {
+            return existing
+        }
+        try db.execute(
+            sql: "INSERT INTO conversations (id, kind, name) VALUES (?, ?, ?)",
+            arguments: [id, kind, name]
+        )
+        return StoredConversation(
+            id: id,
+            kind: kind,
+            name: name,
+            unread: 0,
+            muted: false,
+            lastMessageTs: 0
+        )
     }
 }

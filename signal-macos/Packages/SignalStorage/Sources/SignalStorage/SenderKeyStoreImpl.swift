@@ -19,7 +19,7 @@ public final class GRDBSenderKeyStore: SenderKeyStore, Sendable {
         record: SenderKeyRecord,
         context: StoreContext
     ) throws {
-        try queue.write { db in
+        try queue.scopedWrite { db in
             try db.execute(
                 sql: """
                     INSERT OR REPLACE INTO sender_keys (address, distribution_id, record)
@@ -40,7 +40,7 @@ public final class GRDBSenderKeyStore: SenderKeyStore, Sendable {
         context: StoreContext
     ) throws -> SenderKeyRecord? {
         guard
-            let row: Data = try queue.read({ db in
+            let row: Data = try queue.scopedRead({ db in
                 try Data.fetchOne(
                     db,
                     sql: """

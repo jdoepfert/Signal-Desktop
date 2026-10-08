@@ -5,16 +5,32 @@ import Foundation
 import LibSignalClient
 import SignalCore
 
+/// One opened chat connection: the envelope stream plus the hook that
+/// closes the underlying socket. The stream ends when the session drops.
+public struct ChatSessionConnection: Sendable {
+    public let envelopes: AsyncStream<IncomingEnvelope>
+    /// Closes the socket (idempotent; errors are swallowed, the connection
+    /// is going away either way).
+    public let close: @Sendable () async -> Void
+
+    public init(
+        envelopes: AsyncStream<IncomingEnvelope>,
+        close: @escaping @Sendable () async -> Void = {}
+    ) {
+        self.envelopes = envelopes
+        self.close = close
+    }
+}
+
 /// One authenticated chat session opener. The live implementation builds a
 /// `Net` for the environment and opens an authenticated chat connection;
-/// tests substitute a scripted fake. A returned stream ends when the
-/// session drops.
+/// tests substitute a scripted fake.
 public protocol ChatConnector: Sendable {
     func openSession(
         username: String,
         password: String,
         environment: Net.Environment
-    ) async throws -> AsyncStream<Data>
+    ) async throws -> ChatSessionConnection
 }
 
 /// Live `ChatConnector` over libsignal's chat transport. Keepalive is
@@ -26,7 +42,7 @@ public struct LiveChatConnector: ChatConnector {
         username: String,
         password: String,
         environment: Net.Environment
-    ) async throws -> AsyncStream<Data> {
+    ) async throws -> ChatSessionConnection {
         let net = Net(
             env: environment,
             userAgent: "signal-macos/0.0.0",
@@ -38,23 +54,42 @@ public struct LiveChatConnector: ChatConnector {
             receiveStories: false,
             languages: []
         )
-        let (stream, continuation) = AsyncStream<Data>.makeStream()
-        let bridge = IncomingBridge(continuation: continuation, connection: connection)
+        let (stream, continuation) = AsyncStream<IncomingEnvelope>.makeStream()
+        let bridge = IncomingBridge(continuation: continuation)
         connection.start(listener: bridge)
-        return stream
+        return ChatSessionConnection(
+            envelopes: stream,
+            close: {
+                // AuthenticatedChatConnection is Sendable; disconnecting
+                // makes libsignal call connectionWasInterrupted, which
+                // finishes the stream.
+                try? await connection.disconnect()
+                continuation.finish()
+            }
+        )
+    }
+}
+
+/// Wraps libsignal's per-message ack so it can be handed to the receiver.
+/// libsignal's `sendAck` closure is safe to call from any thread, but is
+/// not annotated `Sendable`.
+private final class AckBox: @unchecked Sendable {
+    private let send: () throws -> Void
+
+    init(_ send: @escaping () throws -> Void) {
+        self.send = send
+    }
+
+    func callAsFunction() throws {
+        try send()
     }
 }
 
 private final class IncomingBridge: ChatConnectionListener {
-    private let continuation: AsyncStream<Data>.Continuation
-    private var connection: AuthenticatedChatConnection?
+    private let continuation: AsyncStream<IncomingEnvelope>.Continuation
 
-    init(
-        continuation: AsyncStream<Data>.Continuation,
-        connection: AuthenticatedChatConnection
-    ) {
+    init(continuation: AsyncStream<IncomingEnvelope>.Continuation) {
         self.continuation = continuation
-        self.connection = connection
     }
 
     func chatConnection(
@@ -63,12 +98,13 @@ private final class IncomingBridge: ChatConnectionListener {
         serverDeliveryTimestamp: UInt64,
         sendAck: @escaping () throws -> Void
     ) {
-        continuation.yield(envelope)
-        try? sendAck()
+        // The ack is NOT sent here: the receiver sends it once the
+        // envelope is durably stored.
+        let ack = AckBox(sendAck)
+        continuation.yield(IncomingEnvelope(bytes: envelope, ack: { try ack() }))
     }
 
     func connectionWasInterrupted(_ service: AuthenticatedChatConnection, error: Error?) {
-        connection = nil
         continuation.finish()
     }
 }
@@ -80,10 +116,12 @@ private final class IncomingBridge: ChatConnectionListener {
 public actor ChatSession {
     private let connector: any ChatConnector
     private let reconnectDelay: @Sendable (Int) async throws -> Void
-    private let output: AsyncStream<Data>.Continuation
-    private let stream: AsyncStream<Data>
+    private let output: AsyncStream<IncomingEnvelope>.Continuation
+    private let stream: AsyncStream<IncomingEnvelope>
     private var pumpTask: Task<Void, Never>?
+    private var closeCurrent: (@Sendable () async -> Void)?
     private var outputFinished = false
+    private var disconnected = false
 
     public init(
         connector: any ChatConnector = LiveChatConnector(),
@@ -93,7 +131,7 @@ public actor ChatSession {
     ) {
         self.connector = connector
         self.reconnectDelay = reconnectDelay
-        var continuation: AsyncStream<Data>.Continuation!
+        var continuation: AsyncStream<IncomingEnvelope>.Continuation!
         self.stream = AsyncStream { continuation = $0 }
         self.output = continuation
     }
@@ -104,7 +142,7 @@ public actor ChatSession {
     }
 
     public func connect(credentials: DeviceCredentials) async throws {
-        guard pumpTask == nil else {
+        guard pumpTask == nil, !disconnected else {
             return
         }
         let username = "\(credentials.aci).\(credentials.deviceId)"
@@ -113,20 +151,23 @@ public actor ChatSession {
             password: credentials.password,
             environment: credentials.environment
         )
+        closeCurrent = session.close
         pumpTask = Task {
             await self.pump(
-                first: session,
+                first: session.envelopes,
                 credentials: credentials,
                 attempt: 0
             )
         }
     }
 
-    public nonisolated func incoming() -> AsyncStream<Data> {
+    public nonisolated func incoming() -> AsyncStream<IncomingEnvelope> {
         stream
     }
 
-    public func disconnect() {
+    /// Stops reconnecting, ends `incoming()` and closes the socket.
+    public func disconnect() async {
+        disconnected = true
         pumpTask?.cancel()
         pumpTask = nil
         // Unpark a pump waiting on an idle stream; disconnect is terminal
@@ -135,15 +176,18 @@ public actor ChatSession {
             outputFinished = true
             output.finish()
         }
+        let close = closeCurrent
+        closeCurrent = nil
+        await close?()
     }
 
     private func pump(
-        first: AsyncStream<Data>,
+        first: AsyncStream<IncomingEnvelope>,
         credentials: DeviceCredentials,
         attempt: Int
     ) async {
         var attempt = attempt
-        var current: AsyncStream<Data>? = first
+        var current: AsyncStream<IncomingEnvelope>? = first
         defer {
             if !outputFinished {
                 outputFinished = true
@@ -152,8 +196,8 @@ public actor ChatSession {
         }
         while !Task.isCancelled {
             if let session = current {
-                for await bytes in session {
-                    output.yield(bytes)
+                for await envelope in session {
+                    output.yield(envelope)
                 }
                 current = nil
             }
@@ -167,11 +211,19 @@ public actor ChatSession {
             }
             attempt += 1
             do {
-                current = try await connector.openSession(
+                let opened = try await connector.openSession(
                     username: "\(credentials.aci).\(credentials.deviceId)",
                     password: credentials.password,
                     environment: credentials.environment
                 )
+                if disconnected || Task.isCancelled {
+                    // disconnect() raced the reconnect: nobody else will
+                    // ever close this socket.
+                    await opened.close()
+                    return
+                }
+                closeCurrent = opened.close
+                current = opened.envelopes
                 // A successful connect ends the backoff sequence: the
                 // next drop starts over at the initial delay.
                 attempt = 0

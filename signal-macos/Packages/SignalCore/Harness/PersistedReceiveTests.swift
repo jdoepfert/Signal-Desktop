@@ -9,155 +9,61 @@ import SignalStorage
 private let persistedAlice = "9d0652a3-dcc3-4d11-975f-74d61598733f"
 private let persistedBob = "6838237D-02F6-4098-B110-698253D15961"
 
-// End-to-end offline path: sealed envelope -> decrypt -> persist ->
-// read-back, through GRDB-backed stores. Duplicate delivery stores once.
+// End-to-end offline path: sealed envelope -> store -> ack -> decrypt ->
+// persist -> read-back, through GRDB-backed stores and the pipe. Duplicate
+// delivery stores once.
 func runPersistedReceiveTests() async {
     do {
-        let context = NullContext()
-        let db = try SignalDatabase.open(path: nil, key: "k")
-        let grdbIdentity = GRDBIdentityStore(queue: db.queue)
-        let grdbSession = GRDBSessionStore(queue: db.queue)
-        let grdbSenderKeys = GRDBSenderKeyStore(queue: db.queue)
-        let messages = MessageStore(queue: db.queue)
-
-        // Bob's identity first (the bundle references it): stored the way
-        // linking stores it; the store never generates one.
-        try grdbIdentity.storeAccountIdentity(
-            aci: IdentityKeyPair.generate(),
-            pni: IdentityKeyPair.generate(),
-            registrationId: generateRegistrationId()
-        )
-        let bobIdentity = try grdbIdentity.identityKeyPair(context: context)
-        let bobAddress = try ProtocolAddress(name: persistedBob, deviceId: 1)
-        let aliceAddress = try ProtocolAddress(name: persistedAlice, deviceId: 1)
-
-        // Bob's prekeys, generated here and stored in GRDB.
-        let bobPreKey = PrivateKey.generate()
-        let bobSignedPreKey = PrivateKey.generate()
-        let bobKyberPreKey = KEMKeyPair.generate()
-        let signedSig = bobIdentity.privateKey.generateSignature(
-            message: bobSignedPreKey.publicKey.serialize()
-        )
-        let kyberSig = bobIdentity.privateKey.generateSignature(
-            message: bobKyberPreKey.publicKey.serialize()
-        )
-        let bundle = try PreKeyBundle(
-            registrationId: grdbIdentity.localRegistrationId(context: context),
-            deviceId: 9,
-            prekeyId: 4570,
-            prekey: bobPreKey.publicKey,
-            signedPrekeyId: 3006,
-            signedPrekey: bobSignedPreKey.publicKey,
-            signedPrekeySignature: signedSig,
-            identity: bobIdentity.identityKey,
-            kyberPrekeyId: 8888,
-            kyberPrekey: bobKyberPreKey.publicKey,
-            kyberPrekeySignature: kyberSig
-        )
-        try grdbSession.storePreKey(
-            PreKeyRecord(id: 4570, privateKey: bobPreKey),
-            id: 4570,
-            context: context
-        )
-        try grdbSession.storeSignedPreKey(
-            SignedPreKeyRecord(
-                id: 3006,
-                timestamp: 42000,
-                privateKey: bobSignedPreKey,
-                signature: signedSig
-            ),
-            id: 3006,
-            context: context
-        )
-        try grdbSession.storeKyberPreKey(
-            KyberPreKeyRecord(
-                id: 8888,
-                timestamp: 42000,
-                keyPair: bobKyberPreKey,
-                signature: kyberSig
-            ),
-            id: 8888,
-            context: context
+        let rig = try ReceiverRig(ourAci: persistedBob, ourDevice: 1)
+        try rig.provisionOwnKeys()
+        let alice = try TestPeer(aci: persistedAlice, deviceId: 1)
+        try alice.establish(with: rig.makeBundle(), recipient: rig.address)
+        let root = IdentityKeyPair.generate()
+        let envelope = try sealedEnvelope(
+            from: alice,
+            to: rig,
+            content: try dataContent(body: "hello-spike", timestamp: 12345),
+            clientTimestamp: 12345,
+            root: root,
+            server: IdentityKeyPair.generate()
         )
 
-        // Alice's (sender) side stays in-memory; only Bob persists.
-        let aliceStore = InMemorySignalProtocolStore()
-        try processPreKeyBundle(
-            bundle,
-            for: bobAddress,
-            ourAddress: aliceAddress,
-            sessionStore: aliceStore,
-            identityStore: aliceStore,
-            context: context
-        )
-        let trustRootKeys = IdentityKeyPair.generate()
-        let serverKeys = IdentityKeyPair.generate()
-        let senderCert = try SenderCertificate(
-            sender: SealedSenderAddress(
-                e164: "+14155550132",
-                uuidString: persistedAlice,
-                deviceId: 1
-            ),
-            publicKey: aliceStore.identityKeyPair(context: context).publicKey,
-            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
-            signerCertificate: ServerCertificate(
-                keyId: 1,
-                publicKey: serverKeys.publicKey,
-                trustRoot: trustRootKeys.privateKey
-            ),
-            signerKey: serverKeys.privateKey
-        )
-
-        var dataMessage = Data()
-        dataMessage.append(pipeField(1, Data("hello-spike".utf8)))
-        dataMessage.append(pipeVarintField(7, 12345))
-        var content = Data()
-        content.append(pipeField(1, dataMessage))
-        let envelope = try sealedSenderEncrypt(
-            content,
-            from: senderCert,
-            to: bobAddress,
-            senderStore: aliceStore,
-            context: context
-        )
-
-        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        let fixture = try PipeFixture.make()
+        let (stream, continuation) = AsyncStream<IncomingEnvelope>.makeStream()
         let pipe = MessagePipe(
             transport: FakeChatTransport(),
-            certs: FakeCerts(first: senderCert, second: senderCert),
-            store: GRDBProtocolStore(
-                identity: grdbIdentity,
-                session: grdbSession,
-                senderKeys: grdbSenderKeys
-            ),
-            ourAddress: bobAddress,
-            trustRoots: [trustRootKeys.publicKey],
-            incomingSource: stream,
-            messages: messages
+            certs: FakeCerts(first: fixture.senderCert, second: fixture.senderCert),
+            store: rig.store,
+            ourAddress: rig.address,
+            trustRoots: [root.publicKey],
+            receiver: try rig.receiver(trustRoots: [root.publicKey]),
+            incomingSource: stream
         )
         await pipe.start()
         // Duplicate delivery (server redelivery is normal).
-        continuation.yield(envelope)
-        continuation.yield(envelope)
+        let acks = AckCounter()
+        continuation.yield(acks.envelope(envelope))
+        continuation.yield(acks.envelope(envelope))
         continuation.finish()
 
-        var received = [DecryptedMessage]()
+        var received = [ReceivedMessage]()
         for await message in pipe.incoming() {
             received.append(message)
         }
-        let stored = try messages.all()
-        check(
+        let stored = try rig.messages.all()
+        try checkT(
             "MessagePipeTests.testPersistedReceive",
             received.count == 1
-                && received.first == DecryptedMessage(
-                    senderAci: persistedAlice,
-                    body: "hello-spike",
-                    timestamp: 12345
-                )
+                && received.first?.senderAci == persistedAlice
+                && received.first?.body == "hello-spike"
+                && received.first?.timestamp == 12345
                 && stored.count == 1
                 && stored.first?.senderAci == persistedAlice
                 && stored.first?.body == "hello-spike"
                 && stored.first?.timestamp == 12345
+                && acks.total == 2
+                && (try rig.unprocessed.count()) == 0,
+            "received=\(received.count) stored=\(stored.count)"
         )
     } catch {
         check("MessagePipeTests.testPersistedReceive", false, "\(error)")
@@ -243,35 +149,4 @@ func runCertValidationTests() async {
             staging.count == 2 && production.count == 2
         )
     }
-}
-
-private func pipeField(_ number: Int, _ bytes: Data) -> Data {
-    var out = Data()
-    out.append(UInt8(number << 3 | 2))
-    var count = bytes.count
-    repeat {
-        var byte = UInt8(count & 0x7F)
-        count >>= 7
-        if count != 0 {
-            byte |= 0x80
-        }
-        out.append(byte)
-    } while count != 0
-    out.append(bytes)
-    return out
-}
-
-private func pipeVarintField(_ number: Int, _ value: UInt64) -> Data {
-    var out = Data()
-    out.append(UInt8(number << 3))
-    var rest = value
-    repeat {
-        var byte = UInt8(rest & 0x7F)
-        rest >>= 7
-        if rest != 0 {
-            byte |= 0x80
-        }
-        out.append(byte)
-    } while rest != 0
-    return out
 }

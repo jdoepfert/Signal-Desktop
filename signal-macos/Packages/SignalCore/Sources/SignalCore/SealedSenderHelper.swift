@@ -81,6 +81,25 @@ public func sealedSenderDecryptUnknownSender(
     trustRoots: [PublicKey],
     context: StoreContext
 ) throws -> (plaintext: Data, senderAci: String) {
+    let result = try sealedSenderDecryptWithDevice(
+        envelope,
+        to: recipient,
+        recipientStore: recipientStore,
+        trustRoots: trustRoots,
+        context: context
+    )
+    return (result.plaintext, result.senderAci)
+}
+
+/// Like `sealedSenderDecryptUnknownSender`, additionally reporting the
+/// sender certificate's device id.
+public func sealedSenderDecryptWithDevice(
+    _ envelope: Data,
+    to recipient: ProtocolAddress,
+    recipientStore: any SignalProtocolStore,
+    trustRoots: [PublicKey],
+    context: StoreContext
+) throws -> (plaintext: Data, senderAci: String, senderDeviceId: UInt32) {
     let content = try UnidentifiedSenderMessageContent(
         message: envelope,
         identityStore: recipientStore,
@@ -99,7 +118,7 @@ public func sealedSenderDecryptUnknownSender(
         recipientStore: recipientStore,
         context: context
     )
-    return (plaintext, senderAci)
+    return (plaintext, senderAci, sender.deviceId)
 }
 
 /// Decrypts a sealed-sender envelope, verifying the sender certificate
@@ -154,6 +173,10 @@ private func decryptInnerContent(
             identityStore: recipientStore,
             context: context
         )
+    case .plaintext:
+        // Decryption-error receipts travel as plaintext content inside a
+        // sealed-sender envelope; the body is the (padded) Content bytes.
+        return try PlaintextContent(bytes: content.contents).body
     default:
         throw SealedSenderHelperError.unsupportedMessageType
     }

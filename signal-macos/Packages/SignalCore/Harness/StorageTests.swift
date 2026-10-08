@@ -18,7 +18,7 @@ func runStorageTests() async {
         let back = try await db.keyValue.get("k")
         check(
             "StorageTests.testMemoryRoundTrip",
-            back == Data("value".utf8) && MigrationChain.currentVersion == 5
+            back == Data("value".utf8) && MigrationChain.currentVersion == 6
         )
     } catch {
         check("StorageTests.testMemoryRoundTrip", false, "\(error)")
@@ -78,6 +78,87 @@ func runStorageTests() async {
         check("StorageTests.testWrongKey", false, "\(error)")
     }
     #endif
+}
+
+// v5 -> v6 (milestone A): a v5 database with three messages, one of them
+// unlinked (conversation_id NULL), migrates to v6 keeping all three, linked
+// to their sender's 1:1 conversation, with the new index and columns.
+func runV5ToV6MigrationTests() {
+    do {
+        let queue = try DatabaseQueue()
+        try MigrationChain.migrate(queue, through: "v5-message-linkage")
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO messages (sender_aci, body, timestamp, conversation_id, envelope_hash)
+                VALUES ('alice', 'one', 100, 'aci:alice', x'01'),
+                       ('alice', 'two', 200, NULL, x'02'),
+                       ('bob', 'three', 300, 'aci:bob', NULL)
+                """)
+            try db.execute(sql: "INSERT INTO conversations (id, kind) VALUES ('aci:alice', 'direct')")
+            try db.execute(sql: "INSERT INTO conversations (id, kind) VALUES ('aci:bob', 'direct')")
+            try db.execute(sql: "INSERT INTO contacts (aci, name) VALUES ('alice', 'Alice')")
+        }
+        try MigrationChain.migrate(queue)
+
+        struct Probe {
+            var rows: [(id: Int64, sender: String, body: String, ts: Int64, conversation: String?, kind: String, status: String?)] = []
+            var index = 0
+            var unprocessed = 0
+            var conversationColumns = [String]()
+            var contactColumns = [String]()
+            var ftsHits = 0
+            var duplicateRejected = false
+        }
+        var probe = Probe()
+        try queue.write { db in
+            for row in try Row.fetchAll(db, sql: "SELECT * FROM messages ORDER BY id") {
+                probe.rows.append((
+                    row["id"], row["sender_aci"], row["body"], row["sent_timestamp"],
+                    row["conversation_id"], row["kind"], row["status"]
+                ))
+            }
+            probe.index = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'messages_conversation'"
+            ) ?? 0
+            probe.unprocessed = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM unprocessed") ?? -1
+            probe.conversationColumns = try db.columns(in: "conversations").map(\.name)
+            probe.contactColumns = try db.columns(in: "contacts").map(\.name)
+            probe.ftsHits = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'two'"
+            ) ?? 0
+            do {
+                try db.execute(
+                    sql: """
+                        INSERT INTO messages (sender_aci, body, sent_timestamp) VALUES ('alice', 'dup', 100)
+                        """
+                )
+            } catch {
+                probe.duplicateRejected = true
+            }
+        }
+        let allLinked = probe.rows.allSatisfy { $0.conversation != nil }
+        check(
+            "StorageTests.testV5ToV6Migration",
+            probe.rows.count == 3
+                && allLinked
+                && probe.rows.map(\.conversation) == ["aci:alice", "aci:alice", "aci:bob"]
+                && probe.rows.map(\.ts) == [100, 200, 300]
+                && probe.rows.map(\.body) == ["one", "two", "three"]
+                && probe.rows.allSatisfy { $0.kind == "text" && $0.status == nil }
+                && probe.index == 1
+                && probe.unprocessed == 0
+                && probe.conversationColumns.contains("expire_timer")
+                && probe.conversationColumns.contains("expire_timer_version")
+                && probe.contactColumns.contains("profile_key")
+                && probe.ftsHits == 1
+                && probe.duplicateRejected,
+            "\(probe)"
+        )
+    } catch {
+        check("StorageTests.testV5ToV6Migration", false, "\(error)")
+    }
 }
 
 func runOpenErrorMappingTests() {

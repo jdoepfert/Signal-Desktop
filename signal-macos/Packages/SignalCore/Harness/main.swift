@@ -73,6 +73,7 @@ await runAsync("StorageTests") {
     await runStoreTests()
     runOpenErrorMappingTests()
     runMigrationAtomicityTests()
+    runV5ToV6MigrationTests()
     await runIdentityTests()
     await runSameKeyConcurrencyTests()
 }
@@ -106,6 +107,10 @@ await runAsync("MessagingTests") {
     runNotificationTests()
     #endif
     await runStandaloneRegistrationTests()
+}
+
+await runAsync("ReceiveTests") {
+    await runReceiveTests()
 }
 
 run("PaddingTests") {

@@ -12,27 +12,42 @@ final class FakeConnector: ChatConnector, @unchecked Sendable {
     private let lock = NSLock()
     private var scripts: [[Data]]
     nonisolated(unsafe) var opens = 0
+    nonisolated(unsafe) var closes = 0
+    /// Envelope acks fired, by first byte of the envelope.
+    nonisolated(unsafe) var acked = [UInt8]()
+    /// When true, sessions stay open (like a live socket) until `close`.
+    let holdOpen: Bool
 
-    init(scripts: [[Data]]) {
+    init(scripts: [[Data]], holdOpen: Bool = false) {
         self.scripts = scripts
+        self.holdOpen = holdOpen
     }
 
     func openSession(
         username: String,
         password: String,
         environment: Net.Environment
-    ) async throws -> AsyncStream<Data> {
+    ) async throws -> ChatSessionConnection {
         let index: Int = lock.withLock {
             opens += 1
             return opens - 1
         }
         let batch = index < scripts.count ? scripts[index] : []
-        return AsyncStream { continuation in
-            for bytes in batch {
-                continuation.yield(bytes)
-            }
+        let (stream, continuation) = AsyncStream<IncomingEnvelope>.makeStream()
+        for bytes in batch {
+            continuation.yield(
+                IncomingEnvelope(bytes: bytes, ack: { [self] in
+                    lock.withLock { acked.append(bytes.first ?? 0) }
+                })
+            )
+        }
+        if !holdOpen {
             continuation.finish()
         }
+        return ChatSessionConnection(envelopes: stream, close: { [self] in
+            lock.withLock { closes += 1 }
+            continuation.finish()
+        })
     }
 }
 
@@ -49,8 +64,8 @@ func runChatSessionTests() async {
             credentials: DeviceCredentials(aci: "a", deviceId: 1, password: "p")
         )
         var received = [Data]()
-        for await bytes in session.incoming() {
-            received.append(bytes)
+        for await envelope in session.incoming() {
+            received.append(envelope.bytes)
             if received.count == 2 {
                 break
             }
@@ -117,5 +132,31 @@ func runChatSessionTests() async {
         )
     } catch {
         check("MessagingTests.testChatSessionBackoffResetsAfterReconnect", false, "\(error)")
+    }
+
+    // disconnect() closes the live socket, and the ack handed to the
+    // consumer is the transport's (nothing is acked until the consumer
+    // calls it).
+    do {
+        let connector = FakeConnector(scripts: [[Data([0x07])]], holdOpen: true)
+        let session = ChatSession(connector: connector, reconnectDelay: { _ in })
+        try await session.connect(
+            credentials: DeviceCredentials(aci: "a", deviceId: 1, password: "p")
+        )
+        var envelope: IncomingEnvelope?
+        for await next in session.incoming() {
+            envelope = next
+            break
+        }
+        let ackedBeforeCall = connector.acked
+        try envelope?.ack()
+        await session.disconnect()
+        check(
+            "MessagingTests.testChatSessionDisconnectClosesSocket",
+            ackedBeforeCall.isEmpty && connector.acked == [0x07] && connector.closes == 1,
+            "acked=\(connector.acked) closes=\(connector.closes)"
+        )
+    } catch {
+        check("MessagingTests.testChatSessionDisconnectClosesSocket", false, "\(error)")
     }
 }

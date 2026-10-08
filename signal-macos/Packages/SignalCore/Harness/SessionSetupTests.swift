@@ -157,156 +157,57 @@ func runUnknownSenderTests() async {
     // fetches + establishes, encrypts; receiver side decrypts. Nothing
     // is dropped for lack of a prior session.
     do {
-        let context = NullContext()
-        let material = try unpublishedBobMaterial()
-        let aliceStore = InMemorySignalProtocolStore()
-        let bobStore = InMemorySignalProtocolStore()
-        let aliceAddress = try ProtocolAddress(name: setupAlice, deviceId: 1)
-        let bobAddress = try ProtocolAddress(name: setupBob, deviceId: 1)
-
-        // The bundle must carry bob's OWN provisioned identity (like a
-        // published bundle); a mismatched identity breaks decryption.
-        let bobIdentity = try bobStore.identityKeyPair(context: context)
-        let bundleSignedSig = bobIdentity.privateKey.generateSignature(
-            message: material.signedPreKey.publicKey.serialize()
-        )
-        let bundleKyberSig = bobIdentity.privateKey.generateSignature(
-            message: material.kyberPreKey.publicKey.serialize()
-        )
-        let bundle = try PreKeyBundle(
-            registrationId: bobStore.localRegistrationId(context: context),
-            deviceId: 1,
-            prekeyId: 4570,
-            prekey: material.preKey.publicKey,
-            signedPrekeyId: 3006,
-            signedPrekey: material.signedPreKey.publicKey,
-            signedPrekeySignature: bundleSignedSig,
-            identity: bobIdentity.identityKey,
-            kyberPrekeyId: 8888,
-            kyberPrekey: material.kyberPreKey.publicKey,
-            kyberPrekeySignature: bundleKyberSig
-        )
+        let rig = try ReceiverRig(ourAci: setupBob, ourDevice: 1)
+        try rig.provisionOwnKeys()
+        let bundle = try rig.makeBundle()
+        let bobIdentity = try rig.identity.identityKeyPair(context: NullContext())
+        // Addresses are keyed by the lowercase service id string.
+        let bobKey = setupBob.lowercased()
         let fakeKeys = FakePreKeys(material: [
-            setupBob: (bobIdentity.identityKey, [bundle])
+            bobKey: (bobIdentity.identityKey, [bundle])
         ])
-
-        // Bob provisions his private prekeys (fresh device, no sessions).
-        try bobStore.storePreKey(
-            PreKeyRecord(id: 4570, privateKey: material.preKey),
-            id: 4570,
-            context: context
-        )
-        try bobStore.storeSignedPreKey(
-            SignedPreKeyRecord(
-                id: 3006,
-                timestamp: 42000,
-                privateKey: material.signedPreKey,
-                signature: material.signedSig
-            ),
-            id: 3006,
-            context: context
-        )
-        try bobStore.storeKyberPreKey(
-            KyberPreKeyRecord(
-                id: 8888,
-                timestamp: 42000,
-                keyPair: material.kyberPreKey,
-                signature: material.kyberSig
-            ),
-            id: 8888,
-            context: context
-        )
-
-        let trustKeys = IdentityKeyPair.generate()
-        let serverKeys = IdentityKeyPair.generate()
-        let senderCert = try SenderCertificate(
-            sender: SealedSenderAddress(e164: nil, uuidString: setupAlice, deviceId: 1),
-            publicKey: aliceStore.identityKeyPair(context: context).publicKey,
-            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
-            signerCertificate: ServerCertificate(
-                keyId: 1,
-                publicKey: serverKeys.publicKey,
-                trustRoot: trustKeys.privateKey
-            ),
-            signerKey: serverKeys.privateKey
-        )
-
+        let alice = try TestPeer(aci: setupAlice, deviceId: 1)
         let setup = SessionSetup(
             keys: fakeKeys,
-            store: aliceStore,
-            ourAddress: aliceAddress
+            store: alice.store,
+            ourAddress: alice.address
         )
-        try await setup.ensureSession(with: setupBob, deviceId: 1)
+        try await setup.ensureSession(with: bobKey, deviceId: 1)
 
-        var dataMessage = Data()
-        dataMessage.append(pipeTestField(1, Data("hello-unknown".utf8)))
-        dataMessage.append(pipeTestVarintField(7, 777))
-        var content = Data()
-        content.append(pipeTestField(1, dataMessage))
-        let envelope = try sealedSenderEncrypt(
-            content,
-            from: senderCert,
-            to: bobAddress,
-            senderStore: aliceStore,
-            context: context
+        let root = IdentityKeyPair.generate()
+        let envelope = try sealedEnvelope(
+            from: alice,
+            to: rig,
+            content: try dataContent(body: "hello-unknown", timestamp: 777),
+            clientTimestamp: 777,
+            root: root,
+            server: IdentityKeyPair.generate()
         )
 
-        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        let (stream, continuation) = AsyncStream<IncomingEnvelope>.makeStream()
+        let fixture = try PipeFixture.make()
         let pipe = MessagePipe(
             transport: FakeChatTransport(),
-            certs: FakeCerts(first: senderCert, second: senderCert),
-            store: bobStore,
-            ourAddress: bobAddress,
-            trustRoots: [trustKeys.publicKey],
+            certs: FakeCerts(first: fixture.senderCert, second: fixture.senderCert),
+            store: rig.store,
+            ourAddress: rig.address,
+            trustRoots: [root.publicKey],
+            receiver: try rig.receiver(trustRoots: [root.publicKey]),
             incomingSource: stream
         )
         await pipe.start()
-        continuation.yield(envelope)
+        continuation.yield(IncomingEnvelope(bytes: envelope, ack: {}))
         continuation.finish()
-        var received: DecryptedMessage?
+        var received: ReceivedMessage?
         for await message in pipe.incoming() {
             received = message
         }
         check(
             "MessagingTests.testUnknownSenderReceives",
-            received == DecryptedMessage(
-                senderAci: setupAlice,
-                body: "hello-unknown",
-                timestamp: 777
-            )
+            received?.senderAci == setupAlice && received?.body == "hello-unknown"
+                && received?.timestamp == 777
         )
     } catch {
         check("MessagingTests.testUnknownSenderReceives", false, "\(error)")
     }
-}
-
-private func pipeTestField(_ number: Int, _ bytes: Data) -> Data {
-    var out = Data()
-    out.append(UInt8(number << 3 | 2))
-    var count = bytes.count
-    repeat {
-        var byte = UInt8(count & 0x7F)
-        count >>= 7
-        if count != 0 {
-            byte |= 0x80
-        }
-        out.append(byte)
-    } while count != 0
-    out.append(bytes)
-    return out
-}
-
-private func pipeTestVarintField(_ number: Int, _ value: UInt64) -> Data {
-    var out = Data()
-    out.append(UInt8(number << 3))
-    var rest = value
-    repeat {
-        var byte = UInt8(rest & 0x7F)
-        rest >>= 7
-        if rest != 0 {
-            byte |= 0x80
-        }
-        out.append(byte)
-    } while rest != 0
-    return out
 }

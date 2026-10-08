@@ -12,9 +12,9 @@ import SignalCore
 /// from `ChatSession.incoming()`. Urgent, stored (not online-only) sends.
 public final class LiveTransport: SealedMessageTransport, Sendable {
     private let messages: any UnauthMessagesService
-    private let incoming: AsyncStream<Data>
+    private let incoming: AsyncStream<IncomingEnvelope>
 
-    public init(messages: any UnauthMessagesService, incoming: AsyncStream<Data>) {
+    public init(messages: any UnauthMessagesService, incoming: AsyncStream<IncomingEnvelope>) {
         self.messages = messages
         self.incoming = incoming
     }
@@ -45,7 +45,7 @@ public final class LiveTransport: SealedMessageTransport, Sendable {
         )
     }
 
-    public func incomingEnvelopes() -> AsyncStream<Data> {
+    public func incomingEnvelopes() -> AsyncStream<IncomingEnvelope> {
         incoming
     }
 }
