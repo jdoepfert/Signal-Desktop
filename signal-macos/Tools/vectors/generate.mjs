@@ -85,6 +85,18 @@ function padMessage(buf) {
   return Buffer.from(plaintext);
 }
 
+function unpadBuf(buf) {
+  for (let i = buf.length - 1; i >= 0; i -= 1) {
+    if (buf[i] === 0x80) {
+      return Buffer.from(buf.subarray(0, i));
+    }
+    if (buf[i] !== 0x00) {
+      throw new Error('bad padding in self-check');
+    }
+  }
+  return Buffer.from(buf);
+}
+
 {
   const cases = [0, 1, 78, 79, 80, 158, 159, 160, 500].map(n => {
     const plain = seeded(`padding/${n}`, n);
@@ -296,7 +308,9 @@ const DATA_TS = 1_700_000_000_123;
     kemPair,
     rcptIdentity.sign(kemPair.getPublicKey().serialize())
   );
-  const oneTime = [101, 102].map(id => {
+  // 101-104 are consumed by the vectors below; 105-110 are spare for
+  // Swift-side tests that build their own senders against this recipient.
+  const oneTime = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110].map(id => {
     const k = privKey(`envelopes/recipient-onetime/${id}`);
     return ls.PreKeyRecord.new(id, k.getPublicKey(), k);
   });
@@ -360,6 +374,65 @@ const DATA_TS = 1_700_000_000_123;
     serverTimestamp: SERVER_TS,
   });
 
+  // One sender, 21 consecutive PREKEY_MESSAGEs on one session (the sender
+  // never hears back, so every message is a PreKeySignalMessage sharing a
+  // base key). The first 20 exercise concurrent/unordered decryption; the
+  // 21st proves the session is still usable afterwards.
+  const SEQ_COUNT = 21;
+  const s3 = await makeSender('sender-sequence', 'cccccccc-dddd-4eee-8fff-000000000000', 4, 1111, oneTime[2]);
+  const sequence = [];
+  for (let n = 1; n <= SEQ_COUNT; n += 1) {
+    const dm = { body: `sequence ${n}`, timestamp: DATA_TS + 1000 + n };
+    const content = encode('Content', { dataMessage: dm });
+    const msg = await ls.signalEncrypt(padMessage(content), rcptAddr, s3.sAddr, s3.sessions, s3.ids);
+    if (msg.type() !== ls.CiphertextMessageType.PreKey) {
+      throw new Error('expected a PreKey ciphertext in the sequence');
+    }
+    sequence.push({
+      envelope: encode('Envelope', {
+        type: ENVELOPE_TYPE.PREKEY_MESSAGE,
+        sourceServiceId: s3.aci.getServiceIdString(),
+        sourceDeviceId: s3.deviceId,
+        destinationServiceId: rcptAci.getServiceIdString(),
+        clientTimestamp: dm.timestamp,
+        content: msg.serialize(),
+        serverGuid: `00000000-0000-4000-8000-0000000001${String(n).padStart(2, '0')}`,
+        serverTimestamp: SERVER_TS,
+      }),
+      ciphertext: msg.serialize(),
+      expectedBody: dm.body,
+      sentTimestamp: dm.timestamp,
+      serverGuid: `00000000-0000-4000-8000-0000000001${String(n).padStart(2, '0')}`,
+    });
+  }
+
+  // Retry pair: two DIFFERENT ciphertexts (message counters 0 and 1) of the
+  // same logical message: same sender, same sent timestamp, same body.
+  const s4 = await makeSender('sender-retry', 'dddddddd-eeee-4fff-8000-111111111111', 6, 2222, oneTime[3]);
+  const RETRY_TS = DATA_TS + 5000;
+  const retryContent = encode('Content', { dataMessage: { body: 'retry me', timestamp: RETRY_TS } });
+  const retryPair = [];
+  for (let n = 1; n <= 2; n += 1) {
+    const msg = await ls.signalEncrypt(padMessage(retryContent), rcptAddr, s4.sAddr, s4.sessions, s4.ids);
+    const guid = `00000000-0000-4000-8000-0000000002${String(n).padStart(2, '0')}`;
+    retryPair.push({
+      envelope: encode('Envelope', {
+        type: ENVELOPE_TYPE.PREKEY_MESSAGE,
+        sourceServiceId: s4.aci.getServiceIdString(),
+        sourceDeviceId: s4.deviceId,
+        destinationServiceId: rcptAci.getServiceIdString(),
+        clientTimestamp: RETRY_TS,
+        content: msg.serialize(),
+        serverGuid: guid,
+        serverTimestamp: SERVER_TS,
+      }),
+      ciphertext: msg.serialize(),
+    });
+  }
+  if (Buffer.from(retryPair[0].ciphertext).equals(Buffer.from(retryPair[1].ciphertext))) {
+    throw new Error('retry pair ciphertexts must differ');
+  }
+
   // Self-check: decrypt both with fresh recipient stores built only from
   // what is written to the JSON file.
   function recipientStores() {
@@ -389,6 +462,29 @@ const DATA_TS = 1_700_000_000_123;
     );
     if (!Buffer.from(plain).equals(padMessage(prekeyContent))) {
       throw new Error('prekey self-check failed');
+    }
+    // Sequence: decrypt in REVERSE order on one store (also proves the
+    // messages are order-independent, which the concurrent test relies on).
+    const r3 = recipientStores();
+    for (const entry of [...sequence].reverse()) {
+      const out = await ls.signalDecryptPreKey(
+        ls.PreKeySignalMessage.deserialize(entry.ciphertext),
+        s3.sAddr, rcptAddr, r3.sessions, r3.ids, r3.pre, r3.signed, r3.kyber
+      );
+      const dm = P.lookupType('Content').decode(unpadBuf(out)).dataMessage;
+      if (dm.body !== entry.expectedBody) {
+        throw new Error('sequence self-check failed');
+      }
+    }
+    const r4 = recipientStores();
+    for (const entry of retryPair) {
+      const out = await ls.signalDecryptPreKey(
+        ls.PreKeySignalMessage.deserialize(entry.ciphertext),
+        s4.sAddr, rcptAddr, r4.sessions, r4.ids, r4.pre, r4.signed, r4.kyber
+      );
+      if (!unpadBuf(out).equals(retryContent)) {
+        throw new Error('retry pair self-check failed');
+      }
     }
   }
 
@@ -434,5 +530,22 @@ const DATA_TS = 1_700_000_000_123;
         serverTimestamp: SERVER_TS,
       },
     ],
+    sequence: {
+      senderAci: s3.aci.getServiceIdString(),
+      senderDeviceId: s3.deviceId,
+      messages: sequence.map(({ envelope, expectedBody, sentTimestamp, serverGuid }) => ({
+        envelope: hex(envelope),
+        expectedBody,
+        sentTimestamp,
+        serverGuid,
+      })),
+    },
+    retryPair: {
+      senderAci: s4.aci.getServiceIdString(),
+      senderDeviceId: s4.deviceId,
+      sentTimestamp: RETRY_TS,
+      expectedBody: 'retry me',
+      envelopes: retryPair.map(e => hex(e.envelope)),
+    },
   });
 }
