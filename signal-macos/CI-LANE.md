@@ -61,6 +61,14 @@ Tools/gen-protos.sh && git diff --exit-code Packages/SignalCore/Sources/SignalCo
 Bump swift-protobuf in the root, `SignalCore` and `SignalMessaging`
 manifests together (and `Package.resolved`), then regenerate.
 
+## macOS harness without RingRTC
+
+`SIGNAL_NO_RINGRTC=1 swift run SpikeHarness` builds and runs the harness
+without `SignalCallsSpike` (no `Tools/build-ringrtc.sh` needed); the two
+RingRTC-dependent checks (`RingRTCTests`, the pin-versions format check) are
+compiled out. The default (variable unset) is unchanged. The app target
+(`SignalMac`) never links RingRTC. See `MAC-BUILD.md`.
+
 ## Linux lane
 
 A verification lane for the non-UI packages (SignalCore, SignalStorage,
