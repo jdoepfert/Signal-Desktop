@@ -106,8 +106,9 @@ Phase 0 precedent, no full GO is claimed until they close.
 
 ## Exit gate
 
-- [x] CI green on `main` (spike-ci lane: FFI builds + full harness +
+- [ ] CI green on `main` (spike-ci lane: FFI builds + full harness +
   strict-concurrency gate). Workflow committed; runs on push/PR paths.
+  *Un-ticked 2026-10-08: no Phase 1 commit ever ran CI (see review below).*
 - [ ] Linked account persists across restarts (manual: link once, quit,
   relaunch, still linked). Needs a phone + the Phase 2 app shell that
   opens the real store at launch.
@@ -158,8 +159,10 @@ need a human with a phone.
   attachments + search).
 - [ ] Live 1:1 both directions + group round-trip verified (user-gated;
   "Note to Self" is the safe loop).
-- [x] CI green on `main` (spike-ci lane: harness + strict gate cover the
+- [ ] CI green on `main` (spike-ci lane: harness + strict gate cover the
   new code; `build-app.sh` assembles the bundle — verified locally).
+  *Un-ticked 2026-10-08: the only run, on 21c0052, had not finished when
+  this was reviewed; a gate needs a linked green run.*
 - [x] Repo-split re-decision recorded: **stay in `signal-macos/` for
   Phase 3.** Rationale unchanged: phases reference Desktop sources
   constantly, nothing is distributed yet. Re-decide when
@@ -182,3 +185,68 @@ need a human with a phone.
   attachment thumbnails/transcoding, message backup import/export,
   keychain recovery UX, XCTest port, own GRDB fork, upstream RingRTC
   macOS cfg, reference-generated provisioning fixtures.
+
+---
+
+# Independent review (2026-10-08)
+
+Two fresh reviewers, one per phase, read the full Phase 1
+(`0516b3b..bb35ed9`) and Phase 2 (`bb35ed9..21c0052`) diffs against their
+plans and Desktop's `ts/textsecure`. Neither had a Swift toolchain, so the
+findings come from reading the code, not running it. The coordinator
+re-checked the critical ones in the code.
+
+**Verdict: Phases 1 and 2 are NOT COMPLETE. Do not build Phase 3 on them.**
+The status lines above stay as they were written at the time; this
+section supersedes them.
+
+Critical (each blocks live text messaging):
+
+1. The linked device signs prekeys with a randomly generated identity key
+   (`IdentityStore.swift:19-27`), not the account identity from the
+   ProvisionMessage. The provisioned keys and the profile key are thrown
+   away.
+2. The QR code holds only the raw provisioning address. The phone needs
+   `sgnl://linkdevice?uuid=…&pub_key=…` (`Provisioner.preload.ts:425`).
+3. Receive treats raw chat payloads as sealed-sender bytes, with no
+   `Envelope` parsing and no unpadding. It acks before decrypting or
+   saving (`ChatSession.swift:66-67`), so every failure loses the message
+   for good.
+4. Send has no padding and no access keys, sends one request per device,
+   ignores 409/410, refetches prekeys on every send, and sends no sync
+   transcript.
+5. Sender-certificate validation is skipped on staging (whose roots *are*
+   published, in `config/default.json:25-28`), and it uses seconds instead
+   of milliseconds everywhere (`SenderCertService.swift:62`,
+   `SealedSenderHelper.swift:75`).
+6. Attachments use AES-GCM. Signal uses AES-CBC + HMAC with padding, and
+   carries the key in the pointer. The format error is in the Phase 2 plan
+   itself.
+
+Important:
+
+- Lost-message window: the ratchet advances before the save.
+- Decrypts are not one transaction.
+- Database key loss silently creates a new key.
+- The app re-links on every launch.
+- Review Focus #2 (group retry) and #5 (ordering across pages) are not
+  actually pinned.
+- Planned services (groups, attachments, search, link previews, profiles)
+  are not wired into the app.
+- Duplicate messages on sender retries (v5 dedupe key).
+- Link previews fetch directly: SSRF, `file://` reads and IP leaks.
+- The untrusted GRDB fork is still in use.
+- Logging is unbounded, in memory only, with weak redaction.
+
+Root cause: the offline fakes were written alongside the code and repeat
+its misunderstandings, and no phase ever closed a live gate.
+
+Response: the roadmap revision
+(`docs/superpowers/specs/2026-10-08-roadmap-revision.md`) replaces Phases
+3–5 with checkpoint-driven milestones. Milestone A
+(`docs/superpowers/plans/2026-10-08-milestone-a-text-messaging.md`) fixes
+the items above for 1:1 and Note to Self text, verified against golden
+vectors from Desktop's stack and closed by a live checkpoint on the
+owner's phone. The "Phase 3 tasks carried over" list above is re-homed:
+fan-out, GRDB fork and provisioning fixtures go to A; group sync and
+attachments to B; thumbnails to C; RingRTC cfg to D; backup to G.

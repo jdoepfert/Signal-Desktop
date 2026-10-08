@@ -97,6 +97,11 @@ become native AVFoundation/ImageIO pipelines.
 
 ## Implementation plan
 
+> **Amended 2026-10-08:** Phases 3–5 below are superseded by
+> `docs/superpowers/specs/2026-10-08-roadmap-revision.md` (checkpoint-driven
+> milestones A–G, with a live real-device checkpoint closing each one).
+> Phases 0–2 are kept as history.
+
 - **Phase 0 — Spike (4–6 wks, 1–2 eng).** libsignal Swift on macOS;
   link as secondary device; send/receive 1:1 text. Go/no-go gate on
   iOS-stack reuse. Also spike RingRTC on macOS here, not in phase 4.
