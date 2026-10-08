@@ -203,29 +203,6 @@ public actor MessagePipe {
         } catch {
             throw MessagePipeError.invalidEnvelope
         }
-        let content: [Int: ProtoValue]
-        let fields: [Int: ProtoValue]
-        do {
-            content = try ProtoFields.parse(plaintext)
-            guard case .bytes(let dataMessage) = content[1] else {
-                throw MessagePipeError.invalidContent
-            }
-            fields = try ProtoFields.parse(dataMessage)
-        } catch {
-            throw MessagePipeError.invalidContent
-        }
-        guard case .bytes(let bodyData) = fields[1],
-              let body = String(data: bodyData, encoding: .utf8)
-        else {
-            throw MessagePipeError.invalidContent
-        }
-        guard case .varint(let timestamp) = fields[7] else {
-            throw MessagePipeError.invalidContent
-        }
-        return DecryptedMessage(
-            senderAci: senderAci,
-            body: body,
-            timestamp: timestamp
-        )
+        return try decodeContentMessage(plaintext, senderAci: senderAci)
     }
 }

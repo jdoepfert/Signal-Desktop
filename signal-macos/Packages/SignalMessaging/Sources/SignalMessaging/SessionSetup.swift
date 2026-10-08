@@ -49,4 +49,27 @@ public struct SessionSetup: Sendable {
             context: NullContext()
         )
     }
+
+    /// Ensures sessions with all of the account's devices, returning their
+    /// device ids. Used for per-device fanout (e.g. sender-key distribution).
+    public func ensureAllSessions(with aci: String) async throws -> [UInt32] {
+        let (_, bundles) = try await keys.fetchBundles(for: aci)
+        var seen = Set<UInt32>()
+        var devices = [UInt32]()
+        for bundle in bundles where seen.insert(bundle.deviceId).inserted {
+            let address = try ProtocolAddress(name: aci, deviceId: bundle.deviceId)
+            if try store.loadSession(for: address, context: NullContext())?.hasCurrentState != true {
+                try processPreKeyBundle(
+                    bundle,
+                    for: address,
+                    ourAddress: ourAddress,
+                    sessionStore: store,
+                    identityStore: store,
+                    context: NullContext()
+                )
+            }
+            devices.append(bundle.deviceId)
+        }
+        return devices
+    }
 }

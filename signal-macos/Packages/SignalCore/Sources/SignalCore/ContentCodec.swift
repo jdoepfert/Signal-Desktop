@@ -3,12 +3,37 @@
 
 import Foundation
 
+/// Decodes decrypted Content bytes (Content{dataMessage{body,timestamp}})
+/// into a text message. Shared by the 1:1 pipe and the group manager.
+public func decodeContentMessage(_ plaintext: Data, senderAci: String) throws -> DecryptedMessage {
+    let content: [Int: ProtoValue]
+    let fields: [Int: ProtoValue]
+    do {
+        content = try ProtoFields.parse(plaintext)
+        guard case .bytes(let dataMessage) = content[1] else {
+            throw MessagePipeError.invalidContent
+        }
+        fields = try ProtoFields.parse(dataMessage)
+    } catch {
+        throw MessagePipeError.invalidContent
+    }
+    guard case .bytes(let bodyData) = fields[1],
+          let body = String(data: bodyData, encoding: .utf8)
+    else {
+        throw MessagePipeError.invalidContent
+    }
+    guard case .varint(let timestamp) = fields[7] else {
+        throw MessagePipeError.invalidContent
+    }
+    return DecryptedMessage(senderAci: senderAci, body: body, timestamp: timestamp)
+}
+
 /// Minimal proto2 encoder for the two shapes MessagePipe emits
 /// (Content{dataMessage} / DataMessage{body,timestamp}). Scoped to exactly
 /// those shapes — field numbers above 15 need multi-byte tags, which this
 /// encoder does not produce. Real protobuf arrives with Phase 2 UI.
-enum ContentCodec {
-    static func lengthDelimitedField(_ number: Int, _ bytes: Data) -> Data {
+public enum ContentCodec {
+    public static func lengthDelimitedField(_ number: Int, _ bytes: Data) -> Data {
         var out = Data()
         out.append(UInt8(number << 3 | 2))
         out.append(contentsOf: varintBytes(bytes.count))
@@ -16,7 +41,7 @@ enum ContentCodec {
         return out
     }
 
-    static func varintField(_ number: Int, _ value: UInt64) -> Data {
+    public static func varintField(_ number: Int, _ value: UInt64) -> Data {
         var out = Data()
         out.append(UInt8(number << 3))
         out.append(contentsOf: varintBytes(value))
