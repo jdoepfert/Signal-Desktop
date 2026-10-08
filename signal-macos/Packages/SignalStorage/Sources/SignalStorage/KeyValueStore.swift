@@ -9,7 +9,7 @@ import GRDB
 public actor KeyValueStore {
     private let queue: DatabaseQueue
 
-    init(queue: DatabaseQueue) {
+    public init(queue: DatabaseQueue) {
         self.queue = queue
     }
 
