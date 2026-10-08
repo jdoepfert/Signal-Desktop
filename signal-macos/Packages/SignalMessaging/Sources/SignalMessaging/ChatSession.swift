@@ -4,6 +4,7 @@
 import Foundation
 import LibSignalClient
 import SignalCore
+import SignalLogging
 
 /// One opened chat connection: the envelope stream plus the hook that
 /// closes the underlying socket. The stream ends when the session drops.
@@ -29,6 +30,19 @@ public struct ChatSessionConnection: Sendable {
 
 public enum ChatSessionError: Error, Equatable {
     case notConnected
+    /// The server refused our credentials (HTTP 401/403, libsignal's
+    /// `deviceDeregistered`): this device was unlinked. Terminal.
+    case deviceUnlinked
+}
+
+/// Coarse connection state for the UI.
+public enum ChatState: Sendable, Equatable {
+    case idle
+    case connected
+    /// The socket dropped; a reconnect is pending.
+    case reconnecting
+    /// Credentials rejected: no reconnect will be attempted.
+    case deviceUnlinked
 }
 
 /// One authenticated chat session opener. The live implementation builds a
@@ -57,12 +71,22 @@ public struct LiveChatConnector: ChatConnector {
             userAgent: "signal-macos/0.0.0",
             buildVariant: .production
         )
-        let connection = try await net.connectAuthenticatedChat(
-            username: username,
-            password: password,
-            receiveStories: false,
-            languages: []
-        )
+        let connection: AuthenticatedChatConnection
+        do {
+            connection = try await net.connectAuthenticatedChat(
+                username: username,
+                password: password,
+                receiveStories: false,
+                languages: []
+            )
+        } catch {
+            // libsignal reports a 401/403 on the websocket upgrade as
+            // `deviceDeregistered`; everything else passes through.
+            if ChatSession.isAuthFailure(error) {
+                throw ChatSessionError.deviceUnlinked
+            }
+            throw error
+        }
         let (stream, continuation) = AsyncStream<IncomingEnvelope>.makeStream()
         let bridge = IncomingBridge(continuation: continuation)
         connection.start(listener: bridge)
@@ -118,6 +142,11 @@ private final class IncomingBridge: ChatConnectionListener {
     }
 
     func connectionWasInterrupted(_ service: AuthenticatedChatConnection, error: Error?) {
+        if let error {
+            ChatSession.logger.error("socket interrupted (\(type(of: error)))")
+        } else {
+            ChatSession.logger.info("socket closed")
+        }
         continuation.finish()
     }
 }
@@ -127,6 +156,8 @@ private final class IncomingBridge: ChatConnectionListener {
 /// then a background pump reopens dropped sessions with backoff until
 /// `disconnect()` stops it.
 public actor ChatSession {
+    fileprivate static let logger = Logger(subsystem: "net", category: "chat")
+
     private let connector: any ChatConnector
     private let reconnectDelay: @Sendable (Int) async throws -> Void
     private let output: AsyncStream<IncomingEnvelope>.Continuation
@@ -136,6 +167,9 @@ public actor ChatSession {
     private var sendCurrent: (@Sendable (ChatRequest) async throws -> (status: UInt16, body: Data))?
     private var outputFinished = false
     private var disconnected = false
+    private var stateValue: ChatState = .idle
+    private let stateOutput: AsyncStream<ChatState>.Continuation
+    private let stateStream: AsyncStream<ChatState>
 
     public init(
         connector: any ChatConnector = LiveChatConnector(),
@@ -148,6 +182,45 @@ public actor ChatSession {
         var continuation: AsyncStream<IncomingEnvelope>.Continuation!
         self.stream = AsyncStream { continuation = $0 }
         self.output = continuation
+        var stateContinuation: AsyncStream<ChatState>.Continuation!
+        self.stateStream = AsyncStream { stateContinuation = $0 }
+        self.stateOutput = stateContinuation
+    }
+
+    /// True for the errors that mean "these credentials are no longer
+    /// valid" (HTTP 401/403 on connect).
+    public static func isAuthFailure(_ error: Error) -> Bool {
+        if let chatError = error as? ChatSessionError, chatError == .deviceUnlinked {
+            return true
+        }
+        if let signalError = error as? SignalError {
+            switch signalError {
+            case .deviceDeregistered, .requestUnauthorized:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    /// The latest connection state.
+    public var state: ChatState {
+        stateValue
+    }
+
+    /// State changes (single consumer, like `incoming()`).
+    public nonisolated func stateUpdates() -> AsyncStream<ChatState> {
+        stateStream
+    }
+
+    private func setState(_ new: ChatState) {
+        // `deviceUnlinked` is terminal.
+        guard stateValue != .deviceUnlinked, stateValue != new else {
+            return
+        }
+        stateValue = new
+        stateOutput.yield(new)
     }
 
     public static func defaultDelay(attempt: Int) async throws {
@@ -160,11 +233,25 @@ public actor ChatSession {
             return
         }
         let username = "\(credentials.aci).\(credentials.deviceId)"
-        let session = try await connector.openSession(
-            username: username,
-            password: credentials.password,
-            environment: credentials.environment
-        )
+        let session: ChatSessionConnection
+        do {
+            session = try await connector.openSession(
+                username: username,
+                password: credentials.password,
+                environment: credentials.environment
+            )
+        } catch {
+            if Self.isAuthFailure(error) {
+                Self.logger.error("connect refused: credentials rejected (device unlinked)")
+                setState(.deviceUnlinked)
+                finishOutput()
+                throw ChatSessionError.deviceUnlinked
+            }
+            Self.logger.error("connect failed (\(type(of: error)))")
+            throw error
+        }
+        Self.logger.info("connected")
+        setState(.connected)
         closeCurrent = session.close
         sendCurrent = session.send
         pumpTask = Task {
@@ -196,14 +283,19 @@ public actor ChatSession {
         pumpTask = nil
         // Unpark a pump waiting on an idle stream; disconnect is terminal
         // (a fresh ChatSession reconnects).
-        if !outputFinished {
-            outputFinished = true
-            output.finish()
-        }
+        finishOutput()
+        stateOutput.finish()
         let close = closeCurrent
         closeCurrent = nil
         sendCurrent = nil
         await close?()
+    }
+
+    private func finishOutput() {
+        if !outputFinished {
+            outputFinished = true
+            output.finish()
+        }
     }
 
     private func pump(
@@ -214,10 +306,7 @@ public actor ChatSession {
         var attempt = attempt
         var current: AsyncStream<IncomingEnvelope>? = first
         defer {
-            if !outputFinished {
-                outputFinished = true
-                output.finish()
-            }
+            finishOutput()
         }
         while !Task.isCancelled {
             if let session = current {
@@ -226,6 +315,11 @@ public actor ChatSession {
                 }
                 current = nil
             }
+            if Task.isCancelled {
+                return
+            }
+            Self.logger.info("socket dropped; reconnect attempt \(attempt + 1)")
+            setState(.reconnecting)
             do {
                 try await reconnectDelay(attempt)
             } catch {
@@ -253,7 +347,16 @@ public actor ChatSession {
                 // A successful connect ends the backoff sequence: the
                 // next drop starts over at the initial delay.
                 attempt = 0
+                setState(.connected)
             } catch {
+                if Self.isAuthFailure(error) {
+                    // Terminal: retrying a rejected credential only
+                    // hammers the server. The UI offers "Start over".
+                    Self.logger.error("reconnect refused: credentials rejected (device unlinked)")
+                    setState(.deviceUnlinked)
+                    return
+                }
+                Self.logger.error("reconnect failed (\(type(of: error)))")
                 continue
             }
         }

@@ -4,8 +4,8 @@
 import Combine
 import Foundation
 import LibSignalClient
-import Security
 import SignalCore
+import SignalLogging
 import SignalMessaging
 import SignalStorage
 
@@ -20,6 +20,19 @@ private struct LiveStack {
     let conversations: ConversationStore
     let contacts: ContactStore
     let messages: MessageStore
+}
+
+/// Where the app is in its account lifecycle.
+public enum AppPhase: Equatable, Sendable {
+    /// Deciding (reading the keychain and database).
+    case starting
+    /// Fresh install (or after "Start over"): showing the QR link flow.
+    case needsLink
+    /// Stored data exists but cannot be used; offers "Start over".
+    case needsReLink(reason: String)
+    case linked
+    /// The phone removed this device; offers "Start over".
+    case unlinked
 }
 
 /// A send refused because the contact's safety number changed; the user
@@ -37,6 +50,7 @@ public struct IdentityChangePrompt: Equatable, Identifiable {
 /// light up when group sync lands (sender-key distribution already works).
 @MainActor
 public final class AppState: ObservableObject {
+    @Published public private(set) var phase: AppPhase = .starting
     @Published public var linkedAci: String?
     @Published public var address: String?
     @Published public var conversations: [StoredConversation] = []
@@ -49,8 +63,14 @@ public final class AppState: ObservableObject {
     public let composer = ComposerState()
 
     private let environment: AppEnvironment
+    private let lifecycle: AccountLifecycle
     private var stack: LiveStack?
     private var pumpTask: Task<Void, Never>?
+    private var launching = false
+    private var linkTask: Task<Void, Never>?
+    private var connectTask: Task<Void, Never>?
+    private var stateTask: Task<Void, Never>?
+    private static let logger = Logger(subsystem: "app", category: "lifecycle")
 
     /// Alert policy for inbound messages; `locked` flips to title-only
     /// when the device locks (device-lock wiring arrives later).
@@ -59,6 +79,13 @@ public final class AppState: ObservableObject {
 
     public init(environment: AppEnvironment) {
         self.environment = environment
+        self.lifecycle = AccountLifecycle(
+            databasePath: Self.databasePath(environment: environment),
+            keys: KeychainDatabaseKeyStore(
+                account: environment == .production ? "db-key-production" : "db-key-staging"
+            ),
+            environment: environment == .production ? .production : .staging
+        )
         composer.onSend = { [weak self] text in
             Task {
                 await self?.send(text: text)
@@ -70,14 +97,97 @@ public final class AppState: ObservableObject {
     }
 
     public var isLinked: Bool {
-        linkedAci != nil
+        phase == .linked
+    }
+
+    /// Starts `start()` in a task that outlives the calling view.
+    public func begin() {
+        Task {
+            await self.start()
+        }
+    }
+
+    /// Launch decision: restore a linked account, start the QR flow, or
+    /// explain why stored data cannot be used. Runs once; further calls
+    /// are ignored.
+    public func start() async {
+        guard phase == .starting, !launching else {
+            return
+        }
+        launching = true
+        defer { launching = false }
+        do {
+            switch try await lifecycle.launch() {
+            case .needsLink:
+                beginLink()
+            case .restored(let credentials):
+                guard let database = await lifecycle.database else {
+                    throw AccountLifecycleError.databaseUnavailable
+                }
+                let netEnv = Self.netEnvironment(environment)
+                let net = Net(env: netEnv, userAgent: "signal-macos/0.0.0", buildVariant: .production)
+                let unauth = try await net.connectUnauthenticatedChat()
+                try await assemble(credentials: credentials, database: database, unauth: unauth)
+            case .needsReLink(let reason):
+                phase = .needsReLink(reason: reason)
+            }
+        } catch {
+            Self.logger.error("start failed (\(type(of: error)))")
+            phase = .needsReLink(
+                reason: "Signal data on this Mac could not be opened (\(type(of: error)))."
+            )
+        }
+    }
+
+    /// "Start over": stops everything, deletes the local database and its
+    /// key, and returns to the QR link flow. The phone still lists this
+    /// Mac under Linked devices until it is removed there.
+    public func startOver() async {
+        Self.logger.info("start over requested")
+        linkTask?.cancel()
+        linkTask = nil
+        connectTask?.cancel()
+        connectTask = nil
+        stateTask?.cancel()
+        stateTask = nil
+        pumpTask?.cancel()
+        pumpTask = nil
+        if let stack {
+            await stack.chat.disconnect()
+        }
+        stack = nil
+        conversations = []
+        selection = nil
+        thread.replaceAll(with: [])
+        linkedAci = nil
+        address = nil
+        error = nil
+        identityPrompt = nil
+        do {
+            try await lifecycle.reset()
+        } catch {
+            Self.logger.error("reset failed (\(type(of: error)))")
+            self.error = "Could not remove local data: \(type(of: error))"
+            phase = .needsReLink(reason: "Removing the local data failed.")
+            return
+        }
+        phase = .starting
+        await start()
+    }
+
+    private func beginLink() {
+        phase = .needsLink
+        linkTask?.cancel()
+        linkTask = Task {
+            await self.link()
+        }
     }
 
     /// Runs the link flow: provisioning address → user scans → envelope →
     /// registration → full stack. Safe to call once; further calls are
     /// ignored.
     public func link() async {
-        guard stack == nil else {
+        guard stack == nil, phase == .needsLink else {
             return
         }
         do {
@@ -104,9 +214,16 @@ public final class AppState: ObservableObject {
                     return
                 }
             }
-            self.error = "Session closed before an envelope arrived. Re-run to retry."
+            if Task.isCancelled {
+                try? await session.disconnect()
+            } else {
+                self.error = "Session closed before an envelope arrived. Re-run to retry."
+            }
         } catch {
-            self.error = String(describing: error)
+            if !Task.isCancelled {
+                Self.logger.error("link failed (\(type(of: error)))")
+                self.error = String(describing: error)
+            }
         }
     }
 
@@ -210,14 +327,17 @@ public final class AppState: ObservableObject {
         }
     }
 
+    private static func netEnvironment(_ environment: AppEnvironment) -> Net.Environment {
+        environment == .production ? .production : .staging
+    }
+
+    /// Link path: register this device, then build the same stack a
+    /// restore builds.
     private func registerAndBuild(account: ProvisionedAccount) async throws {
-        let netEnv: Net.Environment = environment == .production ? .production : .staging
+        let netEnv = Self.netEnvironment(environment)
         let net = Net(env: netEnv, userAgent: "signal-macos/0.0.0", buildVariant: .production)
         let unauth = try await net.connectUnauthenticatedChat()
-        let database = try SignalDatabase.open(
-            path: Self.databasePath(environment: environment),
-            key: try Self.databaseKey(environment: environment)
-        )
+        let database = try await lifecycle.databaseForLinking()
         let identityStore = GRDBIdentityStore(queue: database.queue)
         let sessionStore = GRDBSessionStore(queue: database.queue)
         let senderKeys = GRDBSenderKeyStore(queue: database.queue)
@@ -233,6 +353,25 @@ public final class AppState: ObservableObject {
             accounts: AccountTable(queue: database.queue)
         )
         let creds = try await registration.register(account: account, environment: netEnv)
+        try await assemble(credentials: creds, database: database, unauth: unauth)
+    }
+
+    /// Builds the live stack from stored credentials. Shared by the link
+    /// path (fresh credentials) and the restore path (credentials read
+    /// back at launch); neither registers anything here.
+    private func assemble(
+        credentials creds: DeviceCredentials,
+        database: SignalDatabase,
+        unauth: UnauthenticatedChatConnection
+    ) async throws {
+        let identityStore = GRDBIdentityStore(queue: database.queue)
+        let sessionStore = GRDBSessionStore(queue: database.queue)
+        let senderKeys = GRDBSenderKeyStore(queue: database.queue)
+        let protocolStore = GRDBProtocolStore(
+            identity: identityStore,
+            session: sessionStore,
+            senderKeys: senderKeys
+        )
 
         // The delivery certificate needs device auth: it goes over the
         // AUTHENTICATED chat socket (Desktop's getSenderCertificate has no
@@ -289,7 +428,6 @@ public final class AppState: ObservableObject {
         // Envelopes acked last session but not yet committed replay BEFORE
         // the socket opens, so they land ahead of anything new.
         await receiver.replayUnprocessed()
-        try await chat.connect(credentials: creds)
         let contacts = ContactStore(
             contacts: contactTable,
             profiles: ProfileFetcher { _ in nil }
@@ -305,21 +443,66 @@ public final class AppState: ObservableObject {
             messages: messages
         )
         linkedAci = creds.aci
+        phase = .linked
         // The receive pump never runs unless the pipe's envelope pump is
         // started: without this the app sends but never receives.
         await pipe.start()
-        // Outbox: rows a crash left pending (older than 30 s) get exactly
-        // one retry, then fail.
-        Task {
-            _ = await sender.recoverPending(now: Self.nowMs())
-            await self.reloadThread()
-        }
         pumpTask = Task {
             await self.pump()
+        }
+        // A rejected login (device removed on the phone) is terminal.
+        stateTask = Task {
+            for await state in chat.stateUpdates() where state == .deviceUnlinked {
+                self.handleDeviceUnlinked()
+            }
+        }
+        // Outbox recovery needs the socket (certificate and keys go over
+        // it), so it runs after the first successful connect.
+        connectTask = Task {
+            await self.connectWithRetry(chat: chat, credentials: creds, sender: sender)
         }
         refreshConversations()
         // Best-effort: denial just means no alerts (policy still runs).
         _ = try? await notifications.requestAuthorization()
+    }
+
+    /// First connect, retried with backoff while the network is down.
+    /// Rejected credentials end the loop (the state stream reports them).
+    private func connectWithRetry(
+        chat: ChatSession,
+        credentials: DeviceCredentials,
+        sender: OutgoingSender
+    ) async {
+        var attempt = 0
+        while !Task.isCancelled {
+            do {
+                try await chat.connect(credentials: credentials)
+                error = nil
+                break
+            } catch ChatSessionError.deviceUnlinked {
+                return
+            } catch {
+                self.error = "Can't reach Signal. Retrying\u{2026}"
+                try? await ChatSession.defaultDelay(attempt: attempt)
+                attempt += 1
+            }
+        }
+        if Task.isCancelled {
+            return
+        }
+        // Outbox: rows a crash left pending (older than 30 s) get exactly
+        // one retry, then fail.
+        _ = await sender.recoverPending(now: Self.nowMs())
+        await reloadThread()
+    }
+
+    private func handleDeviceUnlinked() {
+        Self.logger.error("device unlinked by the server")
+        pumpTask?.cancel()
+        pumpTask = nil
+        connectTask?.cancel()
+        connectTask = nil
+        phase = .unlinked
     }
 
     private func pump() async {
@@ -406,31 +589,15 @@ public final class AppState: ObservableObject {
         UInt64(Date().timeIntervalSince1970 * 1000)
     }
 
-    private static func databasePath(environment: AppEnvironment) throws -> String {
+    private static func databasePath(environment: AppEnvironment) -> String {
         let base = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first!
-        let dir = base
+        return base
             .appending(path: "SignalMac", directoryHint: .isDirectory)
             .appending(path: environment == .production ? "production" : "staging", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appending(path: "db.sqlite").path
-    }
-
-    private static func databaseKey(environment: AppEnvironment) throws -> String {
-        let account = environment == .production ? "db-key-production" : "db-key-staging"
-        if let existing = try KeychainStore.load(service: "org.signal.signal-mac", account: account),
-           let key = String(data: existing, encoding: .utf8)
-        {
-            return key
-        }
-        var bytes = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-            throw ProvisioningError.envelopeInvalid
-        }
-        let key = Data(bytes).base64EncodedString()
-        try KeychainStore.save(Data(key.utf8), service: "org.signal.signal-mac", account: account)
-        return key
+            .appending(path: "db.sqlite")
+            .path
     }
 }

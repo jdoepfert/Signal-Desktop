@@ -47,6 +47,7 @@ let package = Package(
         .package(path: libsignalSwiftPath),
         .package(path: "../SignalCore"),
         .package(path: "../SignalStorage"),
+        .package(path: "../SignalLogging"),
         // Test-only search needs GRDB directly; version owned by
         // SignalStorage/Package.swift, keep the revision in sync.
         grdbDependency,
@@ -59,6 +60,7 @@ let package = Package(
                 .product(name: "LibSignalClient", package: "swift"),
                 "SignalCore",
                 "SignalStorage",
+                "SignalLogging",
                 .product(name: "GRDB", package: grdbPackage),
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ] + cryptoProducts

@@ -43,6 +43,18 @@ public final class AccountTable: Sendable {
         }
     }
 
+    /// The single stored account, if any (one row per database; with
+    /// several rows the lowest aci wins, deterministically).
+    public func loadAny() throws -> StoredAccount? {
+        let aci: String? = try queue.read { db in
+            try String.fetchOne(db, sql: "SELECT aci FROM accounts ORDER BY aci LIMIT 1")
+        }
+        guard let aci else {
+            return nil
+        }
+        return try load(aci: aci)
+    }
+
     public func load(aci: String) throws -> StoredAccount? {
         struct AccountRow: FetchableRecord {
             let aci: String

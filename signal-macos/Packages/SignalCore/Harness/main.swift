@@ -107,6 +107,7 @@ await runAsync("MessagingTests") {
     runNotificationTests()
     #endif
     await runStandaloneRegistrationTests()
+    await runLifecycleTests()
 }
 
 await runAsync("ReceiveTests") {
