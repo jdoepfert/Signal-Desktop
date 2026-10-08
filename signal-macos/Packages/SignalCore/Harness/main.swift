@@ -90,6 +90,7 @@ await runAsync("MessagingTests") {
     await runLinkedRegistrationTests()
     await runSearchTests()
     await runLinkPreviewTests()
+    runNotificationTests()
 }
 
 exit(checkResult())

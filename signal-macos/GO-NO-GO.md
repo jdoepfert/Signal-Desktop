@@ -138,3 +138,47 @@ Phase 0 precedent, no full GO is claimed until they close.
   recovery UX; (3) log file sink; (4) real send path (authenticated chat
   + device list); (5) XCTest port; (6) upstream RingRTC macOS cfg;
   (7) reference-generated provisioning fixtures.
+
+---
+
+# Phase 2 exit verdict (Core Messaging)
+
+**Status: CONDITIONAL COMPLETE.** All automatable work is done and green
+(harness checks passing, strict-concurrency clean): live chat session
+with reconnect, session setup + sender certs, contacts/profiles/search,
+group messaging with redistribution retry, attachments with digest
+verification, conversations UI in a runnable ad-hoc-signed bundle,
+notifications policy, standalone registration flow. The remaining gates
+need a human with a phone.
+
+## Exit gate
+
+- [ ] Daily-driveable dogfood week (user-gated: build via
+  `Tools/build-app.sh`, link with the phone, exercise 1:1 + groups +
+  attachments + search).
+- [ ] Live 1:1 both directions + group round-trip verified (user-gated;
+  "Note to Self" is the safe loop).
+- [x] CI green on `main` (spike-ci lane: harness + strict gate cover the
+  new code; `build-app.sh` assembles the bundle — verified locally).
+- [x] Repo-split re-decision recorded: **stay in `signal-macos/` for
+  Phase 3.** Rationale unchanged: phases reference Desktop sources
+  constantly, nothing is distributed yet. Re-decide when
+  notarization/distribution work starts.
+
+## Review Focus replay
+
+- Unknown-contact inbound → pinned (`testUnknownSenderReceives`: fetch,
+  establish, decrypt, nothing dropped).
+- Stale group member list → pinned (`testGroupSend`: redistribute to new
+  members + single retry, never half-deliver).
+- Attachment digest mismatch → pinned (`testAttachmentTamper`: throws,
+  partial file deleted, nothing renders).
+- Muted/global-off → pinned (`testNotificationMuted`,
+  `testNotificationGlobalOff`: silent).
+- Out-of-order delivery → pinned (`testThreadOrdering`: timestamp, then
+  rowId arrival proxy).
+- Phase 3 tasks carried over: per-device sealed fanout verification live
+  (offline proven), group sync (member lists arrive via sync messages),
+  attachment thumbnails/transcoding, message backup import/export,
+  keychain recovery UX, XCTest port, own GRDB fork, upstream RingRTC
+  macOS cfg, reference-generated provisioning fixtures.
