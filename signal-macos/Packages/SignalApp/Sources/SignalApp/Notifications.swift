@@ -41,19 +41,24 @@ public struct NotificationPolicy: Sendable {
 /// UserNotifications wiring: authorization on first link, delivery per
 /// policy, tap opens the conversation. Alert delivery itself needs a
 /// running app; the decision logic above carries the unit tests.
-public final class Notifications: NSObject, @unchecked Sendable {
-    public var onTap: (String) -> Void = { _ in }
+///
+/// Main-actor isolated: `onTap` touches app state. The delegate callbacks
+/// arrive on a background executor, so they are `nonisolated` and hop to
+/// the main actor explicitly before calling it.
+@MainActor
+public final class Notifications: NSObject {
+    public var onTap: @MainActor (String) -> Void = { _ in }
 
     public override init() {
         super.init()
         UNUserNotificationCenter.current().delegate = self
     }
 
-    public func requestAuthorization() async throws -> Bool {
+    public nonisolated func requestAuthorization() async throws -> Bool {
         try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
     }
 
-    public func deliver(_ decision: NotificationDecision, conversationId: String) async throws {
+    public nonisolated func deliver(_ decision: NotificationDecision, conversationId: String) async throws {
         let content = UNMutableNotificationContent()
         switch decision {
         case .alert(let title, let body):
@@ -74,14 +79,21 @@ public final class Notifications: NSObject, @unchecked Sendable {
 }
 
 extension Notifications: UNUserNotificationCenterDelegate {
-    public func userNotificationCenter(
+    public nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        onTap(response.notification.request.identifier)
+        // Read the (non-Sendable) response here, then hop to the main
+        // actor with just the identifier.
+        let conversationId = response.notification.request.identifier
+        await handleTap(conversationId)
     }
 
-    public func userNotificationCenter(
+    private func handleTap(_ conversationId: String) {
+        onTap(conversationId)
+    }
+
+    public nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {

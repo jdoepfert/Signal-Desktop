@@ -32,6 +32,12 @@ cd signal-macos
    If it says 5.x, install the current Xcode (16 or newer) from the App Store
    and run `sudo xcode-select -s /Applications/Xcode.app`.
 
+   Use **Xcode 16.3 or newer** (the current Swift toolchain). The package
+   graph lists SignalCore and SignalApp as depending on each other at the
+   package level, which the Linux toolchain (Swift 6.3) resolves; older
+   SwiftPM versions are unproven. **Known risk:** if SwiftPM reports a package
+   cycle between SignalCore and SignalApp, paste the exact error back.
+
 3. **Rust** through rustup (libsignal pins its toolchain in
    `rust-toolchain`; rustup installs it automatically on the first build, and
    the host target `aarch64-apple-darwin` is already part of it, so no
@@ -135,6 +141,14 @@ Running the binary from Terminal is also the best way to see a crash message.
 normally. If you copy it to another Mac, or macOS says it cannot verify the
 developer, right-click the app, choose **Open**, then **Open** again (or
 System Settings, Privacy & Security, "Open Anyway").
+
+**Keychain prompt after every rebuild.** The build is ad-hoc signed, so its
+code identity changes with each build, and macOS asks whether the new build
+may read the database key from the keychain. Answer **Always Allow** (enter
+your login password if asked). If you answer **Deny**, the app shows a
+"Couldn't start" screen with a **Retry** button instead of opening; nothing is
+deleted, press Retry and allow. Never press **Start over** to get past a
+keychain prompt: it deletes the local database and key.
 
 **Notifications.** macOS may ask to allow notifications; either answer is
 fine (an ad-hoc signed app often cannot show them at all).
