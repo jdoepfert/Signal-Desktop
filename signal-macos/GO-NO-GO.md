@@ -35,9 +35,18 @@ Verify: `cd signal-macos && swift run SpikeHarness` (9/9 checks pass).
   `SpikeHarness link` CLI. Needs a staging-registered phone to scan the
   address. See blockers.
 
-### (c) 1:1 text both directions — PENDING Task 4
+### (c) 1:1 text both directions — OFFLINE PROVEN, live pending
 
-- Offline message-pipe work not yet done at the time of writing.
+- `testDecryptKnownEnvelope` passes: sealed envelope → `DecryptedMessage`
+  (sender ACI, body, timestamp) through the Content-proto mapping.
+- `testFirstSendRetriesOnMissingCert` passes: cert rejection → refresh →
+  exactly one retry → delivered (verified by decrypting the retried
+  envelope).
+- Transport and sender-cert provider are protocol seams with in-memory
+  fakes; the real libsignal send path (`UnauthMessagesService.sendMessage`
+  with sealed contents) and authenticated chat connection are reconned
+  and wired for Phase 1, not run live. Live both-directions exchange
+  needs two staging accounts. See blockers.
 
 ### (d) RingRTC initializes on macOS headless — YES (FFI layer)
 

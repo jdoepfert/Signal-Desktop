@@ -52,16 +52,17 @@ public func sealedSenderEncrypt(
     )
 }
 
-/// Decrypts a sealed-sender envelope, verifying the sender certificate
-/// against `trustRoot` and that the sender matches `sender`.
-public func sealedSenderDecrypt(
+/// Decrypts a sealed-sender envelope without a prior sender expectation.
+/// Returns the plaintext and the sender ACI from the sender certificate.
+/// New API for the message pipe; `sealedSenderDecrypt` below keeps its
+/// exact signature and delegates to this.
+public func sealedSenderDecryptUnknownSender(
     _ envelope: Data,
     to recipient: ProtocolAddress,
-    from sender: ProtocolAddress,
     recipientStore: InMemorySignalProtocolStore,
     trustRoot: PublicKey,
     context: StoreContext
-) throws -> Data {
+) throws -> (plaintext: Data, senderAci: String) {
     let content = try UnidentifiedSenderMessageContent(
         message: envelope,
         identityStore: recipientStore,
@@ -73,9 +74,51 @@ public func sealedSenderDecrypt(
     ) else {
         throw SealedSenderHelperError.untrustedSender
     }
-    guard content.senderCertificate.sender.uuidString == sender.name else {
+    let senderAci = content.senderCertificate.sender.uuidString
+    let sender = try ProtocolAddress(
+        name: senderAci,
+        deviceId: UInt32(content.senderCertificate.sender.deviceId)
+    )
+    let plaintext = try decryptInnerContent(
+        content,
+        from: sender,
+        to: recipient,
+        recipientStore: recipientStore,
+        context: context
+    )
+    return (plaintext, senderAci)
+}
+
+/// Decrypts a sealed-sender envelope, verifying the sender certificate
+/// against `trustRoot` and that the sender matches `sender`.
+public func sealedSenderDecrypt(
+    _ envelope: Data,
+    to recipient: ProtocolAddress,
+    from sender: ProtocolAddress,
+    recipientStore: InMemorySignalProtocolStore,
+    trustRoot: PublicKey,
+    context: StoreContext
+) throws -> Data {
+    let (plaintext, senderAci) = try sealedSenderDecryptUnknownSender(
+        envelope,
+        to: recipient,
+        recipientStore: recipientStore,
+        trustRoot: trustRoot,
+        context: context
+    )
+    guard senderAci == sender.name else {
         throw SealedSenderHelperError.unexpectedSender
     }
+    return plaintext
+}
+
+private func decryptInnerContent(
+    _ content: UnidentifiedSenderMessageContent,
+    from sender: ProtocolAddress,
+    to recipient: ProtocolAddress,
+    recipientStore: InMemorySignalProtocolStore,
+    context: StoreContext
+) throws -> Data {
     switch content.messageType {
     case .preKey:
         return try signalDecryptPreKey(

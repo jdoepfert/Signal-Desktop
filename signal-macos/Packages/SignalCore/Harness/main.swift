@@ -45,4 +45,8 @@ run("RingRTCTests") {
     runRingRTCInitTests()
 }
 
+await runAsync("MessagePipeTests") {
+    await runMessagePipeTests()
+}
+
 exit(checkResult())

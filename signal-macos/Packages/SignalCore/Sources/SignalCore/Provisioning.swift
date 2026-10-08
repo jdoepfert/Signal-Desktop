@@ -34,11 +34,16 @@ public enum ProvisioningError: Error, Equatable {
     case untrustedHost
 }
 
-/// Minimal proto2 reader: length-delimited fields keyed by field number.
-/// Only what ProvisionEnvelope/ProvisionMessage need (wire types 0, 1, 2, 5).
+/// Minimal proto2 reader: fields keyed by field number, preserving both
+/// length-delimited payloads and varint values.
+enum ProtoValue: Equatable {
+    case bytes(Data)
+    case varint(UInt64)
+}
+
 enum ProtoFields {
-    static func parse(_ data: Data) throws -> [Int: Data] {
-        var fields = [Int: Data]()
+    static func parse(_ data: Data) throws -> [Int: ProtoValue] {
+        var fields = [Int: ProtoValue]()
         var index = data.startIndex
         while index < data.endIndex {
             let (tag, afterTag) = try readVarint(data, from: index)
@@ -46,7 +51,9 @@ enum ProtoFields {
             let fieldNumber = Int(tag >> 3)
             switch tag & 0x07 {
             case 0:
-                index = try readVarint(data, from: index).1
+                let (value, afterValue) = try readVarint(data, from: index)
+                fields[fieldNumber] = .varint(value)
+                index = afterValue
             case 1:
                 guard let end = data.index(index, offsetBy: 8, limitedBy: data.endIndex),
                       end == data.index(index, offsetBy: 8)
@@ -65,7 +72,7 @@ enum ProtoFields {
                 else {
                     throw ProvisioningError.envelopeInvalid
                 }
-                fields[fieldNumber] = data[afterCount..<end]
+                fields[fieldNumber] = .bytes(data[afterCount..<end])
                 index = end
             case 5:
                 guard let end = data.index(index, offsetBy: 4, limitedBy: data.endIndex),
@@ -150,13 +157,15 @@ public struct Provisioning: Sendable {
         _ envelopeData: Data,
         ourPrivateKeyBytes: Data
     ) throws -> String {
-        let envelope: [Int: Data]
+        let envelope: [Int: ProtoValue]
         do {
             envelope = try ProtoFields.parse(envelopeData)
         } catch {
             throw ProvisioningError.envelopeInvalid
         }
-        guard let ephemeralBytes = envelope[1], let body = envelope[2] else {
+        guard case .bytes(let ephemeralBytes) = envelope[1],
+              case .bytes(let body) = envelope[2]
+        else {
             throw ProvisioningError.envelopeInvalid
         }
 
@@ -213,20 +222,22 @@ public struct Provisioning: Sendable {
             throw ProvisioningError.envelopeInvalid
         }
 
-        let message: [Int: Data]
+        let message: [Int: ProtoValue]
         do {
             message = try ProtoFields.parse(plaintext)
         } catch {
             throw ProvisioningError.envelopeInvalid
         }
-        if let aciData = message[8],
+        if case .bytes(let aciData) = message[8],
            !aciData.isEmpty,
            let aci = String(data: aciData, encoding: .utf8),
            !aci.isEmpty
         {
             return aci
         }
-        if let binary = message[17], let aci = ProtoFields.uuidString(binary) {
+        if case .bytes(let binary) = message[17],
+           let aci = ProtoFields.uuidString(binary)
+        {
             return aci
         }
         throw ProvisioningError.envelopeInvalid
