@@ -41,4 +41,8 @@ await runAsync("ProvisioningTests") {
     await runProvisioningTests()
 }
 
+run("RingRTCTests") {
+    runRingRTCInitTests()
+}
+
 exit(checkResult())

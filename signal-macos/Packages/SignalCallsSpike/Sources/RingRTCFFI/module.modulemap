@@ -1,0 +1,4 @@
+module RingRTCFFI [system] {
+    header "ringrtc_spike.h"
+    export *
+}

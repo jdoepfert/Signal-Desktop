@@ -18,7 +18,10 @@ let package = Package(
     name: "SignalCore",
     platforms: [.macOS(.v13)],
     products: [.library(name: "SignalCore", targets: ["SignalCore"])],
-    dependencies: [.package(path: libsignalSwiftPath)],
+    dependencies: [
+        .package(path: libsignalSwiftPath),
+        .package(path: "../SignalCallsSpike"),
+    ],
     targets: [
         .target(
             name: "SignalCore",
@@ -30,6 +33,7 @@ let package = Package(
             dependencies: [
                 "SignalCore",
                 .product(name: "LibSignalClient", package: "swift"),
+                .product(name: "SignalCallsSpike", package: "SignalCallsSpike"),
             ],
             path: "Harness",
             linkerSettings: [.unsafeFlags(["-L\(ffiLibDir)"])]

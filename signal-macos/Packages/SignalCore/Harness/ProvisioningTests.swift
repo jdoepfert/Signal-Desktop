@@ -122,7 +122,7 @@ func runProvisioningTests() async {
             aci: expectedAci,
             ourPublicKey: ours.publicKey
         )
-        let provisioning = try Provisioning(ourPrivateKey: ours)
+        let provisioning = Provisioning(ourPrivateKey: ours)
         let creds = try await provisioning.link(envelopeData: envelope, deviceId: 2)
         check(
             "ProvisioningTests.testProvisionEnvelopeDecrypts",
@@ -139,7 +139,7 @@ func runProvisioningTests() async {
             ourPublicKey: ours.publicKey
         )
         // Stale session: decrypting with a different key must fail fast.
-        let stale = try Provisioning(ourPrivateKey: PrivateKey.generate())
+        let stale = Provisioning(ourPrivateKey: PrivateKey.generate())
         do {
             _ = try await stale.link(envelopeData: envelope, deviceId: 2)
             check("ProvisioningTests.testEnvelopeExpirySurfaced", false, "no error thrown")
