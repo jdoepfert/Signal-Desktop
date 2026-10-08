@@ -53,4 +53,8 @@ run("EnvironmentTests") {
     runPinVersionsFormatTests()
 }
 
+run("LoggingTests") {
+    runLoggingTests()
+}
+
 exit(checkResult())
