@@ -1,0 +1,55 @@
+# Copyright 2026 Signal Messenger, LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: spike-ci
+on:
+  push:
+    paths:
+      - 'signal-macos/**'
+      - '.github/workflows/spike-ci.yml'
+  pull_request:
+    paths:
+      - 'signal-macos/**'
+      - '.github/workflows/spike-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    name: Native Swift spike
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      EXPECTED_LIBSIGNAL_SHA: 4beb029d8a941f81e7d9c6d8af1ed25a677569a8
+      EXPECTED_RINGRTC_SHA: 331d601894f931337d24e9d56c68b94d28fc4555
+      EXPECTED_WEBRTC_TAG: 7871n
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Build libsignal FFI
+        run: signal-macos/Tools/build-ffi.sh
+
+      - name: Build RingRTC and fetch WebRTC
+        run: signal-macos/Tools/build-ringrtc.sh
+
+      - name: Assert pinned versions
+        run: |
+          PINS="$(signal-macos/Tools/pin-versions.sh)"
+          echo "$PINS"
+          EXPECTED="libsignal=${EXPECTED_LIBSIGNAL_SHA} ringrtc=${EXPECTED_RINGRTC_SHA} webrtc=${EXPECTED_WEBRTC_TAG}"
+          test "$PINS" = "$EXPECTED"
+
+      - name: Run SpikeHarness
+        run: cd signal-macos && swift run SpikeHarness
+
+      - name: Strict-concurrency gate
+        run: |
+          cd signal-macos
+          OUT="$(swift build -Xswiftc -strict-concurrency=complete 2>&1)"
+          echo "$OUT" | grep -E "warning:|error:" | grep "signal-macos/Packages" | grep -v "ld: warning" && exit 1 || true
+          echo "strict-concurrency clean"

@@ -59,9 +59,11 @@ Verify: `cd signal-macos && swift run SpikeHarness` (14/14 checks pass).
   mic/camera/network.
 - Required finding: the lite C FFI is gated
   `#[cfg(any(target_os = "ios", feature = "check-all"))]`, so a stock
-  macOS build exports no FFI symbols. This spike builds with a 5-line
-  scratch patch adding `target_os = "macos"` to those gates
-  (`src/rust/src/lite/*.rs` in the scratch checkout). **Phase 1 needs
+  macOS build exports no FFI symbols. This spike builds ringrtc
+  `331d601894f931337d24e9d56c68b94d28fc4555` with a 5-line scratch
+  patch adding `target_os = "macos"` to those gates
+  (`src/rust/src/lite/*.rs` in the scratch checkout, applied by
+  `Tools/build-ringrtc.sh`). **Phase 1 needs
   this as a real upstream change** (or a vendored fork).
 - Not exercised: full `CallManager` media path (needs the WebRTC ObjC
   module; only the static core was linked) and the `SignalRingRTC`

@@ -24,34 +24,22 @@ Notes:
   XCTest ships only with full Xcode. Phase 1 adopts XCTest once Xcode
   (local or CI) is available; the harness assertions map 1:1.
 
-## libsignal FFI prerequisite
+## Third-party builds (scripted)
 
-`SignalCore` links `libsignal_ffi.a`, built from a pinned checkout.
-`SignalCallsSpike` links `libringrtc.a` (macOS FFI build) and prebuilt
-`libwebrtc.a`. All three manifests resolve these by path **relative to
-themselves**, so fresh clones work if the checkouts live here (paths are
-relative to the repo root; run every `swift` command from `signal-macos/`):
+`SignalCore` links `libsignal_ffi.a`; `SignalCallsSpike` links
+`libringrtc.a` (macOS FFI build) and prebuilt `libwebrtc.a`. Build all
+three with the scripts (needs `cargo`, `protoc`, `python3` on PATH;
+checkouts land under `.superpowers/.../third-party`, which every
+manifest points at by relative path):
 
 ```sh
-VENDOR=.superpowers/sdd/2026-10-07-native-swift-spike/third-party
-# libsignal @ 4beb029d8a941f81e7d9c6d8af1ed25a677569a8
-git clone --depth 1 https://github.com/signalapp/libsignal.git $VENDOR/libsignal
-git -C $VENDOR/libsignal checkout 4beb029d8a941f81e7d9c6d8af1ed25a677569a8
-# needs: cargo, rust-src component, protoc on PATH
-(cd $VENDOR/libsignal && ./swift/build_ffi.sh)   # -> target/debug/libsignal_ffi.a
-
-# ringrtc @ <sha in GO-NO-GO.md>: apply the 5-line lite-FFI macOS cfg patch
-# documented there, then
-(cd $VENDOR/ringrtc && cargo build -p ringrtc)    # -> target/debug/libringrtc.a
-# prebuilt mac-arm64 WebRTC core:
-python3 $VENDOR/ringrtc/bin/fetch-artifact.py -p mac-arm64 \
-  --webrtc-version <see ringrtc/config/version.properties> \
-  -o $VENDOR/ringrtc-webrtc --archive-dir <anywhere-writable>
+signal-macos/Tools/build-ffi.sh      # libsignal @ pinned SHA -> target/debug/libsignal_ffi.a
+signal-macos/Tools/build-ringrtc.sh  # ringrtc @ pinned SHA (+macOS FFI patch) + mac-arm64 WebRTC
+signal-macos/Tools/pin-versions.sh   # prints libsignal=<sha> ringrtc=<sha> webrtc=<tag>
 ```
 
-The manifests carry `-L` search dirs only in the workspace root
-`signal-macos/Package.swift` (relative `-L` differs per manifest, so it
-cannot live in the sub-package manifests without breaking root builds).
+Set `SIGNAL_SPIKE_THIRD_PARTY` to relocate the checkouts (scripts and
+manifests stay consistent as long as all three live side by side).
 The AES known-answer fixture
 (`Packages/SignalCore/Fixtures/aes-cbc-known-answer.json`) was
 generated with `openssl enc -aes-256-cbc` and is independent of `AesCbc`.

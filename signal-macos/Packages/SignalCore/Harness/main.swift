@@ -49,4 +49,8 @@ await runAsync("MessagePipeTests") {
     await runMessagePipeTests()
 }
 
+run("EnvironmentTests") {
+    runPinVersionsFormatTests()
+}
+
 exit(checkResult())
