@@ -62,6 +62,77 @@ public final class GRDBSessionStore: SessionStore, PreKeyStore, SignedPreKeyStor
         }
     }
 
+    // MARK: - Device enumeration and archiving (send side)
+
+    /// Devices of `aci` that have a usable (current-state) session, with the
+    /// registration id each session recorded. Archived sessions are not
+    /// listed: they cannot encrypt.
+    public func activeSessionDevices(
+        forAci aci: String
+    ) throws -> [(deviceId: UInt32, registrationId: UInt32)] {
+        let prefix = "\(aci):"
+        let rows: [(String, Data)] = try queue.scopedRead { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT address, record FROM sessions WHERE substr(address, 1, ?) = ? ORDER BY address",
+                arguments: [prefix.count, prefix]
+            ).map { ($0["address"] as String, $0["record"] as Data) }
+        }
+        var out = [(deviceId: UInt32, registrationId: UInt32)]()
+        for (address, bytes) in rows {
+            guard let device = UInt32(address.dropFirst(prefix.count)) else {
+                continue
+            }
+            let record = try SessionRecord(bytes: bytes)
+            if record.hasCurrentState {
+                out.append((device, try record.remoteRegistrationId()))
+            }
+        }
+        return out.sorted { $0.deviceId < $1.deviceId }
+    }
+
+    /// Archives the current state of one session (no-op when absent), as
+    /// Desktop's `archiveSession`: the record stays, but cannot encrypt.
+    public func archiveSession(for address: ProtocolAddress) throws {
+        try queue.scopedWrite { db in
+            guard
+                let bytes = try Data.fetchOne(
+                    db,
+                    sql: "SELECT record FROM sessions WHERE address = ?",
+                    arguments: [Self.addressKey(address)]
+                )
+            else {
+                return
+            }
+            let record = try SessionRecord(bytes: bytes)
+            record.archiveCurrentState()
+            try db.execute(
+                sql: "UPDATE sessions SET record = ? WHERE address = ?",
+                arguments: [record.serialize(), Self.addressKey(address)]
+            )
+        }
+    }
+
+    /// Archives every session of `aci` (Desktop `archiveAllSessions`).
+    public func archiveAllSessions(forAci aci: String) throws {
+        let prefix = "\(aci):"
+        try queue.scopedWrite { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT address, record FROM sessions WHERE substr(address, 1, ?) = ?",
+                arguments: [prefix.count, prefix]
+            )
+            for row in rows {
+                let record = try SessionRecord(bytes: row["record"] as Data)
+                record.archiveCurrentState()
+                try db.execute(
+                    sql: "UPDATE sessions SET record = ? WHERE address = ?",
+                    arguments: [record.serialize(), row["address"] as String]
+                )
+            }
+        }
+    }
+
     // MARK: - PreKeyStore
 
     public func loadPreKey(id: UInt32, context: StoreContext) throws -> PreKeyRecord {

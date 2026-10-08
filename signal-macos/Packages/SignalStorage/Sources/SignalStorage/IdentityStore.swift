@@ -161,9 +161,18 @@ public final class GRDBIdentityStore: IdentityKeyStore, AccountIdentityStoring, 
         direction: Direction,
         context: StoreContext
     ) throws -> Bool {
-        if let known = try self.identity(for: address, context: context) {
-            return known == identity
-        } else {
+        // Desktop SignalProtocolStore.isTrustedIdentity: Direction.Receiving
+        // is always trusted (libsignal then saves the new key through
+        // saveIdentity, so a reinstalled contact is still received and the
+        // stored identity follows). Only SENDING rejects a changed,
+        // previously-saved key (isTrustedForSending).
+        switch direction {
+        case .receiving:
+            return true
+        case .sending:
+            if let known = try self.identity(for: address, context: context) {
+                return known == identity
+            }
             return true
         }
     }

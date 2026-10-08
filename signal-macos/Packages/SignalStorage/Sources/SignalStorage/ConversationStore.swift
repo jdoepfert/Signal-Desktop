@@ -68,6 +68,35 @@ public final class ConversationStore: Sendable {
         }
     }
 
+    /// The conversation's disappearing-message timer and version (both nil
+    /// when never set).
+    public func expireTimer(_ id: String) throws -> (timer: UInt32?, version: UInt32?) {
+        try queue.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT expire_timer, expire_timer_version FROM conversations WHERE id = ?",
+                arguments: [id]
+            ) else {
+                return (nil, nil)
+            }
+            let timer: Int64? = row["expire_timer"]
+            let version: Int64? = row["expire_timer_version"]
+            return (
+                timer.map { UInt32(truncatingIfNeeded: $0) },
+                version.map { UInt32(truncatingIfNeeded: $0) }
+            )
+        }
+    }
+
+    public func setExpireTimer(_ id: String, timer: UInt32?, version: UInt32?) throws {
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE conversations SET expire_timer = ?, expire_timer_version = ? WHERE id = ?",
+                arguments: [timer.map { Int64($0) }, version.map { Int64($0) }, id]
+            )
+        }
+    }
+
     public func markRead(_ id: String) throws {
         try queue.write { db in
             try db.execute(sql: "UPDATE conversations SET unread = 0 WHERE id = ?", arguments: [id])

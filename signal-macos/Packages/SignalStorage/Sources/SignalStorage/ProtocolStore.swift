@@ -43,6 +43,21 @@ public final class GRDBProtocolStore: SignalProtocolStore, Sendable {
         try ActiveTransaction.write(session.queue, body)
     }
 
+    /// Usable sessions of `aci`: device id and recorded registration id.
+    public func activeSessionDevices(
+        forAci aci: String
+    ) throws -> [(deviceId: UInt32, registrationId: UInt32)] {
+        try session.activeSessionDevices(forAci: aci)
+    }
+
+    public func archiveSession(for address: ProtocolAddress) throws {
+        try session.archiveSession(for: address)
+    }
+
+    public func archiveAllSessions(forAci aci: String) throws {
+        try session.archiveAllSessions(forAci: aci)
+    }
+
     public func identityKeyPair(context: StoreContext) throws -> IdentityKeyPair {
         try identity.identityKeyPair(context: context)
     }

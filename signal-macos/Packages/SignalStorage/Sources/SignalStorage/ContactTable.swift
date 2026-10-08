@@ -69,6 +69,30 @@ public final class ContactTable: Sendable {
         }
     }
 
+    /// The contact's profile key, when known (used to derive the sealed
+    /// sender access key).
+    public func profileKey(aci: String) throws -> Data? {
+        try queue.read { db in
+            try Data.fetchOne(
+                db,
+                sql: "SELECT profile_key FROM contacts WHERE aci = ?",
+                arguments: [aci]
+            )
+        }
+    }
+
+    public func setProfileKey(aci: String, profileKey: Data?) throws {
+        try queue.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO contacts (aci, profile_key) VALUES (?, ?)
+                    ON CONFLICT(aci) DO UPDATE SET profile_key = excluded.profile_key
+                    """,
+                arguments: [aci, profileKey]
+            )
+        }
+    }
+
     public func fetch(aci: String) throws -> StoredContact? {
         try queue.read { db in
             try StoredContact.fetchOne(

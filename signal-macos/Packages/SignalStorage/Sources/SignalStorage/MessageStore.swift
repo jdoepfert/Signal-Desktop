@@ -54,6 +54,14 @@ public enum MessageKind {
     public static let sentSync = "sent-sync"
 }
 
+/// Outbox states of an outgoing row (`messages.status`). Inbound rows have
+/// no status.
+public enum MessageStatus {
+    public static let pending = "pending"
+    public static let sent = "sent"
+    public static let failed = "failed"
+}
+
 /// Where a message belongs; resolved to a conversation id inside the
 /// persisting transaction.
 public enum ConversationTarget: Sendable, Equatable {
@@ -211,6 +219,29 @@ public final class MessageStore: Sendable, MessageWriting {
                 ),
                 conversationId: conversationId,
                 in: db
+            )
+        }
+    }
+
+    /// Updates an outgoing row's outbox status.
+    public func setStatus(rowId: Int64, status: String) throws {
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE messages SET status = ? WHERE id = ?",
+                arguments: [status, rowId]
+            )
+        }
+    }
+
+    /// Outgoing rows still `pending`, oldest first.
+    public func pendingOutgoing() throws -> [StoredMessage] {
+        try queue.read { db in
+            try StoredMessage.fetchAll(
+                db,
+                sql: """
+                    SELECT \(Self.columns) FROM messages
+                    WHERE status = 'pending' ORDER BY id
+                    """
             )
         }
     }
