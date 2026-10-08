@@ -137,6 +137,7 @@ public actor EnvelopeReceiver {
             // sent-timestamp dedupe absorbs.
             Self.logger.error("ack failed: \(Self.reason(error))")
         }
+        Self.logger.info("receive: envelope stored")
         handle(id: id, bytes: incoming.bytes)
     }
 
@@ -197,6 +198,7 @@ public actor EnvelopeReceiver {
                 return result
             }
             if let committed {
+                Self.logger.info("receive: message committed")
                 continuation.yield(committed)
             }
         } catch SignalError.duplicatedMessage {
@@ -204,9 +206,13 @@ public actor EnvelopeReceiver {
             // the first copy committed). The transaction rolled back, so
             // nothing changed; the cache row has nothing left to do.
             Self.logger.info("dropping redelivered envelope (already decrypted)")
-            try? unprocessed.remove(id: id)
+            do {
+                try unprocessed.remove(id: id)
+            } catch {
+                Self.logger.error("could not remove redelivered envelope: \(Self.reason(error))")
+            }
         } catch {
-            Self.logger.error("envelope not processed: \(Self.reason(error))")
+            Self.logger.error("receive decrypt failed: \(Self.reason(error))")
             if let kind = Self.permanentKind(of: error) {
                 // Retrying can never help: do not leave it for three more
                 // launches, record the loss now.
@@ -468,6 +474,6 @@ public actor EnvelopeReceiver {
         if error is EnvelopeError || error is PaddingError || error is SealedSenderHelperError {
             return "\(error)"
         }
-        return String(describing: type(of: error))
+        return ErrorReason.describe(error)
     }
 }

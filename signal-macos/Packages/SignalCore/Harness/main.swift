@@ -45,7 +45,7 @@ await runAsync("ProvisioningTests") {
     runProvisioningCodeTests()
 }
 
-#if os(macOS)
+#if os(macOS) && SIGNAL_RINGRTC
 run("RingRTCTests") {
     runRingRTCInitTests()
 }
@@ -59,13 +59,16 @@ await runAsync("MessagePipeTests") {
 
 #if os(macOS)
 run("EnvironmentTests") {
+    #if SIGNAL_RINGRTC
     runPinVersionsFormatTests()
+    #endif
     runBootstrapTests()
 }
 #endif
 
 run("LoggingTests") {
     runLoggingTests()
+    runLoggingSinkTests()
 }
 
 await runAsync("StorageTests") {
@@ -108,6 +111,7 @@ await runAsync("MessagingTests") {
     #endif
     await runStandaloneRegistrationTests()
     await runLifecycleTests()
+    await runLiveFailureLogTests()
 }
 
 await runAsync("ReceiveTests") {

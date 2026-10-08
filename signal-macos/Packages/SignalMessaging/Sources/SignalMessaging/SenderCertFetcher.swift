@@ -4,6 +4,7 @@
 import Foundation
 import LibSignalClient
 import SignalCore
+import SignalLogging
 
 /// Fetches the server-issued sender (delivery) certificate:
 /// `GET /v1/certificate/delivery?includeE164=false` (Desktop
@@ -19,6 +20,8 @@ public struct SenderCertFetcher: Sendable {
     /// certificate is requested without our E164.
     public static let deliveryEndpoint = "/v1/certificate/delivery?includeE164=false"
 
+    private static let logger = Logger(subsystem: "net", category: "sender-cert")
+
     private let send: Send
 
     public init(send: @escaping Send) {
@@ -30,19 +33,36 @@ public struct SenderCertFetcher: Sendable {
     }
 
     public func fetchCertificate() async throws -> SenderCertificate {
-        let response = try await send(
-            ChatRequest(method: "GET", pathAndQuery: Self.deliveryEndpoint, timeout: 30)
-        )
+        let response: (status: UInt16, body: Data)
+        do {
+            response = try await send(
+                ChatRequest(method: "GET", pathAndQuery: Self.deliveryEndpoint, timeout: 30)
+            )
+        } catch {
+            Self.logger.error("sender certificate request failed: \(ErrorReason.describe(error))")
+            throw error
+        }
         guard (200..<300).contains(response.status) else {
+            Self.logger.error("sender certificate rejected: HTTP \(response.status)")
             throw LinkRegistrationError.rejected(status: response.status)
         }
-        guard
-            let json = try? JSONDecoder().decode(CertificateJSON.self, from: response.body),
-            let bytes = Data(base64Encoded: json.certificate)
-        else {
+        let json: CertificateJSON
+        do {
+            json = try JSONDecoder().decode(CertificateJSON.self, from: response.body)
+        } catch {
+            Self.logger.error("sender certificate response undecodable")
             throw LinkRegistrationError.invalidResponse
         }
-        return try SenderCertificate(bytes)
+        guard let bytes = Data(base64Encoded: json.certificate) else {
+            Self.logger.error("sender certificate is not base64")
+            throw LinkRegistrationError.invalidResponse
+        }
+        do {
+            return try SenderCertificate(bytes)
+        } catch {
+            Self.logger.error("sender certificate unparseable: \(ErrorReason.describe(error))")
+            throw error
+        }
     }
 
     /// Adapts this fetcher to the pipe's certificate provider seam.

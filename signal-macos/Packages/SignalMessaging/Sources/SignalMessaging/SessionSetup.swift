@@ -4,6 +4,7 @@
 import Foundation
 import LibSignalClient
 import SignalCore
+import SignalLogging
 import SignalStorage
 
 /// Prekey-bundle source. The real implementation calls
@@ -19,6 +20,8 @@ public struct LivePreKeyService: PreKeyService {
     /// Sends one request over the authenticated chat socket
     /// (`ChatSession.send`).
     public typealias AuthenticatedSend = LiveTransport.AuthenticatedSend
+
+    fileprivate static let logger = Logger(subsystem: "net", category: "prekeys")
 
     private let keys: any UnauthKeysService
     private let authenticatedSend: AuthenticatedSend?
@@ -71,9 +74,20 @@ extension LivePreKeyService: PreKeyBundleFetching {
                 )
             } catch SignalError.requestUnauthorized {
                 // Stale or wrong profile key: not an error, fall through.
+                Self.logger.info("prekey fetch: access key refused (401/403); trying authenticated")
+            } catch {
+                Self.logger.error("prekey fetch (access key) failed: \(ErrorReason.describe(error))")
+                throw error
             }
+        } else {
+            Self.logger.info("prekey fetch: no access key; using authenticated request")
         }
-        return try await fetchAuthenticated(aci, deviceIds: deviceIds, send: authenticatedSend)
+        do {
+            return try await fetchAuthenticated(aci, deviceIds: deviceIds, send: authenticatedSend)
+        } catch {
+            Self.logger.error("prekey fetch (authenticated) failed: \(ErrorReason.describe(error))")
+            throw error
+        }
     }
 
     private func fetchUnauthenticated(
@@ -149,6 +163,7 @@ extension LivePreKeyService: PreKeyBundleFetching {
         do {
             response = try JSONDecoder().decode(KeysResponseJSON.self, from: body)
         } catch {
+            logger.error("prekey response undecodable")
             throw LinkRegistrationError.invalidResponse
         }
         let identity = try IdentityKey(bytes: try decodeBase64(response.identityKey))
@@ -157,6 +172,7 @@ extension LivePreKeyService: PreKeyBundleFetching {
                 let signed = device.signedPreKey, let signedSignature = signed.signature,
                 let kyber = device.pqPreKey, let kyberSignature = kyber.signature
             else {
+                logger.error("prekey response lacks a signed or kyber prekey")
                 throw LinkRegistrationError.invalidResponse
             }
             let signedKey = try PublicKey(try decodeBase64(signed.publicKey))

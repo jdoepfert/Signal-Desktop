@@ -4,6 +4,7 @@
 import Foundation
 import LibSignalClient
 import SignalCore
+import SignalLogging
 
 /// Live `SealedMessageTransport` over libsignal's chat services: sealed
 /// 1:1 sends go through the unauthenticated message service (sealed sender
@@ -70,7 +71,40 @@ public final class LiveTransport: SealedMessageTransport, Sendable {
 }
 
 extension LiveTransport: MessageSubmitter {
+    fileprivate static let logger = Logger(subsystem: "net", category: "transport")
+
     public func submit(_ request: SendRequest) async throws -> SubmitResult {
+        let path: String
+        switch request.auth {
+        case .accessKey:
+            path = "sealed"
+        case .authenticated:
+            path = "authenticated"
+        }
+        do {
+            let result = try await performSubmit(request)
+            Self.logger.info("send request (\(path)): \(Self.describe(result))")
+            return result
+        } catch {
+            Self.logger.error("send request (\(path)) failed: \(ErrorReason.describe(error))")
+            throw error
+        }
+    }
+
+    private static func describe(_ result: SubmitResult) -> String {
+        switch result {
+        case .ok:
+            return "accepted"
+        case .unauthorized:
+            return "unauthorized (401/403)"
+        case .mismatched:
+            return "device list mismatch (409/410)"
+        case .stale:
+            return "stale devices (410)"
+        }
+    }
+
+    private func performSubmit(_ request: SendRequest) async throws -> SubmitResult {
         switch request.auth {
         case .accessKey(let key):
             let recipient = try Self.serviceId(request.destination)
@@ -177,7 +211,13 @@ extension LiveTransport: MessageSubmitter {
         case 404:
             throw SendError.unregisteredUser
         case 409, 410:
-            let parsed = (try? JSONDecoder().decode(MismatchBody.self, from: body))
+            let parsed: MismatchBody?
+            do {
+                parsed = try JSONDecoder().decode(MismatchBody.self, from: body)
+            } catch {
+                logger.error("\(status) body unparseable; treating as an empty device list")
+                parsed = nil
+            }
             return classify(
                 missing: parsed?.missingDevices ?? [],
                 extra: parsed?.extraDevices ?? [],

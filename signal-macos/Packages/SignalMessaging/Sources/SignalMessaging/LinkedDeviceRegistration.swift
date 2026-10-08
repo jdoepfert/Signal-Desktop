@@ -4,6 +4,7 @@
 import Foundation
 import LibSignalClient
 import SignalCore
+import SignalLogging
 import SignalStorage
 
 public enum LinkRegistrationError: Error, Equatable {
@@ -78,6 +79,8 @@ private struct LinkDeviceResponse: Decodable {
 /// ids below; key rotation/top-up arrives later. The device name is sent
 /// encrypted to the ACI identity key (`DeviceName`).
 public struct LinkedDeviceRegistration: Sendable {
+    private static let logger = Logger(subsystem: "registration", category: "link")
+
     /// Prekey ids. The protocol store has no per-service-id partition, so
     /// the PNI keys take their own ids rather than shadowing the ACI ones.
     static let aciPreKeyId: UInt32 = 1
@@ -201,23 +204,35 @@ public struct LinkedDeviceRegistration: Sendable {
         )
         let bodyData = try JSONEncoder().encode(body)
         let basic = Data("\(aci):\(password)".utf8).base64EncodedString()
-        let (status, responseBody) = try await transport.put(
-            path: "/v1/devices/link",
-            headers: [
-                "Authorization": "Basic \(basic)",
-                "Content-Type": "application/json",
-            ],
-            body: bodyData
-        )
+        Self.logger.info("link request: sending")
+        let reply: (status: UInt16, body: Data)
+        do {
+            reply = try await transport.put(
+                path: "/v1/devices/link",
+                headers: [
+                    "Authorization": "Basic \(basic)",
+                    "Content-Type": "application/json",
+                ],
+                body: bodyData
+            )
+        } catch {
+            Self.logger.error("link request failed: \(ErrorReason.describe(error))")
+            throw error
+        }
+        let status = reply.status
+        let responseBody = reply.body
         guard (200..<300).contains(status) else {
+            Self.logger.error("link request rejected: HTTP \(status)")
             throw LinkRegistrationError.rejected(status: status)
         }
         let response: LinkDeviceResponse
         do {
             response = try JSONDecoder().decode(LinkDeviceResponse.self, from: responseBody)
         } catch {
+            Self.logger.error("link response undecodable")
             throw LinkRegistrationError.invalidResponse
         }
+        Self.logger.info("link request: accepted (device \(response.deviceId))")
         let envString = environment == .staging ? "staging" : "production"
         try accounts.save(
             StoredAccount(

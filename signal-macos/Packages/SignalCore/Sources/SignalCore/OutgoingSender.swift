@@ -211,6 +211,7 @@ public actor OutgoingSender {
         do {
             try await transmitText(body, to: aci, timestamp: timestamp, timer: timer, version: version)
         } catch {
+            Self.logger.error("send failed: \(Self.reason(error))")
             markStatus(rowId, MessageStatus.failed)
             throw error
         }
@@ -256,6 +257,7 @@ public actor OutgoingSender {
                 version: version
             )
         } catch {
+            Self.logger.error("resend failed: \(Self.reason(error))")
             markStatus(row.rowId, MessageStatus.failed)
             throw error
         }
@@ -319,8 +321,11 @@ public actor OutgoingSender {
         var dataMessage = SignalServiceProtos_DataMessage()
         dataMessage.body = body
         dataMessage.timestamp = timestamp
-        if let profileKey = try? identity.profileKey() {
-            dataMessage.profileKey = profileKey
+        do {
+            dataMessage.profileKey = try identity.profileKey()
+        } catch {
+            // The message still goes out, just without our profile key.
+            Self.logger.info("own profile key unavailable: \(Self.reason(error))")
         }
         if let timer, timer > 0 {
             dataMessage.expireTimer = timer
@@ -411,6 +416,9 @@ public actor OutgoingSender {
         let excluding: UInt32? = aci == ourAci ? ourDeviceId : nil
         let sealedKey = sealed ? knownAccessKey(for: aci) : nil
         var auth: SendAuth = sealedKey.map { .accessKey($0) } ?? .authenticated
+        Self.logger.info(
+            "send: starting (\(sealedKey == nil ? "authenticated, no access key" : "sealed"))"
+        )
         var mismatches = 0
         // Desktop's `recurse`: false after a stale-only answer, so the one
         // retry that follows may not itself be refused for device reasons.
@@ -440,6 +448,9 @@ public actor OutgoingSender {
                 auth = .authenticated
             case .mismatched(let missing, let extra):
                 mismatches += 1
+                Self.logger.info(
+                    "send: device list mismatch (missing \(missing.count), extra \(extra.count)); attempt \(mismatches)"
+                )
                 guard mismatches < Self.maxSubmits else {
                     throw SendError.deviceMismatchLoop
                 }
@@ -450,6 +461,7 @@ public actor OutgoingSender {
                 mayRecurse = true
             case .stale(let devices):
                 mismatches += 1
+                Self.logger.info("send: stale devices (\(devices.count)); attempt \(mismatches)")
                 guard mismatches < Self.maxSubmits else {
                     throw SendError.deviceMismatchLoop
                 }
@@ -512,7 +524,7 @@ public actor OutgoingSender {
         } catch SignalError.untrustedIdentity {
             // Desktop: archive every session with the recipient, surface
             // the error. The transaction already rolled back.
-            try? store.archiveAllSessions(forAci: aci)
+            archiveAfterIdentityChange(aci)
             throw SendError.identityChanged(aci)
         }
     }
@@ -578,8 +590,17 @@ public actor OutgoingSender {
         do {
             try await repair(aci, missing: missing, extra: extra, stale: stale, excluding: excluding)
         } catch SignalError.untrustedIdentity {
-            try? store.archiveAllSessions(forAci: aci)
+            archiveAfterIdentityChange(aci)
             throw SendError.identityChanged(aci)
+        }
+    }
+
+    private func archiveAfterIdentityChange(_ aci: String) {
+        Self.logger.error("send: recipient identity changed; archiving sessions")
+        do {
+            try store.archiveAllSessions(forAci: aci)
+        } catch {
+            Self.logger.error("archiving sessions failed: \(Self.reason(error))")
         }
     }
 
@@ -613,58 +634,91 @@ public actor OutgoingSender {
         excluding: UInt32?,
         trustPresentedIdentity: Bool = false
     ) async throws {
-        let fetched = try await bundles.fetchBundles(
-            for: aci,
-            deviceIds: deviceIds,
-            accessKey: knownAccessKey(for: aci)
-        )
+        let fetched: [PreKeyBundle]
+        do {
+            fetched = try await bundles.fetchBundles(
+                for: aci,
+                deviceIds: deviceIds,
+                accessKey: knownAccessKey(for: aci)
+            )
+        } catch {
+            Self.logger.error("prekey fetch failed: \(Self.reason(error))")
+            throw error
+        }
+        Self.logger.info("prekey fetch: \(fetched.count) bundle(s)")
         let context = NullContext()
         let ourAddress = self.ourAddress
         let store = self.store
-        try store.withTransaction { _ in
-            for bundle in fetched where bundle.deviceId != excluding {
-                let address = try ProtocolAddress(name: aci, deviceId: bundle.deviceId)
-                if deviceIds == nil,
-                   try store.loadSession(for: address, context: context)?.hasCurrentState == true
-                {
-                    continue
+        do {
+            try store.withTransaction { _ in
+                for bundle in fetched where bundle.deviceId != excluding {
+                    let address = try ProtocolAddress(name: aci, deviceId: bundle.deviceId)
+                    if deviceIds == nil,
+                       try store.loadSession(for: address, context: context)?.hasCurrentState == true
+                    {
+                        continue
+                    }
+                    if trustPresentedIdentity {
+                        // The user accepted the new safety number: record the
+                        // key the server presents BEFORE libsignal compares it.
+                        _ = try store.saveIdentity(bundle.identityKey, for: address, context: context)
+                    }
+                    try processPreKeyBundle(
+                        bundle,
+                        for: address,
+                        ourAddress: ourAddress,
+                        sessionStore: store,
+                        identityStore: store,
+                        context: context
+                    )
                 }
-                if trustPresentedIdentity {
-                    // The user accepted the new safety number: record the
-                    // key the server presents BEFORE libsignal compares it.
-                    _ = try store.saveIdentity(bundle.identityKey, for: address, context: context)
-                }
-                try processPreKeyBundle(
-                    bundle,
-                    for: address,
-                    ourAddress: ourAddress,
-                    sessionStore: store,
-                    identityStore: store,
-                    context: context
-                )
             }
+        } catch {
+            // An identity change is reported to the caller (and logged
+            // there); anything else is a session-setup fault.
+            if !Self.isUntrustedIdentity(error) {
+                Self.logger.error("session setup failed: \(Self.reason(error))")
+            }
+            throw error
         }
+    }
+
+    private static func isUntrustedIdentity(_ error: Error) -> Bool {
+        if case SignalError.untrustedIdentity = error {
+            return true
+        }
+        return false
     }
 
     /// The recipient's sealed-sender access key, derived from the profile
     /// key we hold for them (ours for our own account); nil when unknown.
     private func knownAccessKey(for aci: String) -> Data? {
         let profileKey: Data?
-        if aci == ourAci {
-            profileKey = try? identity.profileKey()
-        } else {
-            profileKey = (try? contacts.profileKey(aci: aci)) ?? nil
+        do {
+            if aci == ourAci {
+                profileKey = try identity.profileKey()
+            } else {
+                profileKey = try contacts.profileKey(aci: aci)
+            }
+        } catch {
+            Self.logger.info("profile key unavailable: \(Self.reason(error))")
+            return nil
         }
         guard let profileKey, profileKey.count == ProfileKey.SIZE else {
             return nil
         }
-        return try? deriveAccessKey(profileKey: profileKey)
+        do {
+            return try deriveAccessKey(profileKey: profileKey)
+        } catch {
+            Self.logger.error("access key derivation failed: \(Self.reason(error))")
+            return nil
+        }
     }
 
     private static func reason(_ error: Error) -> String {
         if error is SendError || error is PaddingError {
             return "\(error)"
         }
-        return String(describing: type(of: error))
+        return ErrorReason.describe(error)
     }
 }

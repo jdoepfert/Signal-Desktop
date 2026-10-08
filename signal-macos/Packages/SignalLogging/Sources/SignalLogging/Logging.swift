@@ -10,36 +10,57 @@ public enum Redaction: Sendable {
 }
 
 /// PII scrubber: every logged string passes through here unless the call
-/// opts out with `redacting: .none`.
+/// opts out with `redacting: .none`. Patterns follow Desktop's
+/// `ts/util/privacy.node.ts` (phone numbers, UUIDs, group ids, attachment
+/// keys) plus blanket rules for key-like material: any long base64 or hex
+/// run is dropped whatever it is, because a key leaking is worse than a
+/// log line reading less well.
 public enum Redactor {
-    private static let phone = try! NSRegularExpression(
-        pattern: #"\+\d{7,15}"#
-    )
-    private static let uuid = try! NSRegularExpression(
-        pattern: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-    )
-    private static let token = try! NSRegularExpression(
-        pattern: #"\b[0-9a-fA-F]{64}\b"#
-    )
+    private static func regex(_ pattern: String) -> NSRegularExpression {
+        // Patterns are compile-time constants; a failure is a programmer
+        // error caught by the first test run.
+        try! NSRegularExpression(pattern: pattern)
+    }
 
+    private static let attachmentKey = regex(#"(attachment://[^\s]+key=)([^\s]+)"#)
+    private static let groupV2 = regex(#"(groupv2\()([^=)]+)(=?=?\))"#)
+    private static let groupV1 = regex(#"(group\()([^)]+)(\))"#)
+    private static let token = regex(#"\b[0-9a-fA-F]{64}\b"#)
+    /// Base64 (standard alphabet, optional padding) of 32+ characters:
+    /// 24+ bytes, i.e. any key, MAC, ciphertext or profile key.
+    private static let base64Run = regex(#"[A-Za-z0-9+/]{32,}={0,2}"#)
+    /// Hex of 16+ characters (8+ bytes): ids, fingerprints, short tokens.
+    private static let hexRun = regex(#"[0-9a-fA-F]{16,}"#)
+    private static let uuid = regex(
+        "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    )
+    private static let phone = regex(#"\+\d{7,15}"#)
+
+    private static func replace(
+        _ pattern: NSRegularExpression,
+        in text: String,
+        with template: String
+    ) -> String {
+        pattern.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: template
+        )
+    }
+
+    // Order matters: long key-like runs go first so that a `+` or digits
+    // inside a base64 key cannot be half-consumed by the phone pattern,
+    // leaving the rest of the key behind.
     public static func redact(_ message: String) -> String {
         var result = message
-        let range = NSRange(result.startIndex..., in: result)
-        result = phone.stringByReplacingMatches(
-            in: result,
-            range: range,
-            withTemplate: "<redacted:phone>"
-        )
-        result = uuid.stringByReplacingMatches(
-            in: result,
-            range: NSRange(result.startIndex..., in: result),
-            withTemplate: "<redacted:uuid>"
-        )
-        result = token.stringByReplacingMatches(
-            in: result,
-            range: NSRange(result.startIndex..., in: result),
-            withTemplate: "<redacted:token>"
-        )
+        result = replace(attachmentKey, in: result, with: "$1<redacted:key>")
+        result = replace(groupV2, in: result, with: "$1<redacted:group>$3")
+        result = replace(groupV1, in: result, with: "$1<redacted:group>$3")
+        result = replace(token, in: result, with: "<redacted:token>")
+        result = replace(base64Run, in: result, with: "<redacted:base64>")
+        result = replace(hexRun, in: result, with: "<redacted:hex>")
+        result = replace(uuid, in: result, with: "<redacted:uuid>")
+        result = replace(phone, in: result, with: "<redacted:phone>")
         return result
     }
 }
@@ -56,21 +77,62 @@ public struct LogEntry: Sendable {
     public let level: LogLevel
     public let message: String
     public let timestamp: Date
+
+    public init(
+        subsystem: String,
+        category: String,
+        level: LogLevel,
+        message: String,
+        timestamp: Date = Date()
+    ) {
+        self.subsystem = subsystem
+        self.category = category
+        self.level = level
+        self.message = message
+        self.timestamp = timestamp
+    }
 }
 
-/// In-memory entry store. Thread-safe by construction (all access under
-/// lock), hence the unchecked conformance. File sinking arrives in Phase 2.
+/// Receives every entry after redaction. Sinks must be fast and must not
+/// log (they run inside `Logger.log`).
+public protocol LogSink: Sendable {
+    func write(_ entry: LogEntry)
+}
+
+/// Bounded in-memory ring (newest `capacity` entries) fanning out to
+/// sinks (os_log, rotating file). Thread-safe by construction (all access
+/// under lock), hence the unchecked conformance.
 public final class LogStore: @unchecked Sendable {
     public static let shared = LogStore()
+    public static let defaultCapacity = 10_000
 
     private let lock = NSLock()
+    private let capacity: Int
     private var stored: [LogEntry] = []
+    private var sinks: [any LogSink] = []
 
-    public init() {}
+    public init(capacity: Int = LogStore.defaultCapacity) {
+        self.capacity = max(1, capacity)
+    }
 
     public func append(_ entry: LogEntry) {
-        lock.withLock {
+        let currentSinks: [any LogSink] = lock.withLock {
             stored.append(entry)
+            if stored.count > capacity {
+                stored.removeFirst(stored.count - capacity)
+            }
+            return sinks
+        }
+        // Outside the lock: a slow sink must not stall other loggers'
+        // ring appends. (Per-sink ordering is the sink's own business.)
+        for sink in currentSinks {
+            sink.write(entry)
+        }
+    }
+
+    public func addSink(_ sink: any LogSink) {
+        lock.withLock {
+            sinks.append(sink)
         }
     }
 

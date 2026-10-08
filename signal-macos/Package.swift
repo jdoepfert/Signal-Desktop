@@ -14,6 +14,30 @@ let ffiLibDir = thirdParty + "/libsignal/target/debug"
 let ringrtcLibDir = thirdParty + "/ringrtc/target/debug"
 let webrtcLibDir = thirdParty + "/ringrtc-webrtc/release/obj"
 
+// The harness's RingRTC checks need libringrtc/libwebrtc (Tools/build-ringrtc.sh,
+// a large download). Set SIGNAL_NO_RINGRTC=1 to build and run the harness
+// without them (MAC-BUILD.md); the app (SignalMac) never links RingRTC.
+let useRingRTC = Context.environment["SIGNAL_NO_RINGRTC"] == nil
+let ringrtcProducts: [Target.Dependency] =
+    useRingRTC
+    ? [
+        .product(
+            name: "SignalCallsSpike",
+            package: "SignalCallsSpike",
+            condition: .when(platforms: [.macOS])
+        )
+    ] : []
+let ringrtcSwiftSettings: [SwiftSetting] =
+    useRingRTC ? [.define("SIGNAL_RINGRTC", .when(platforms: [.macOS]))] : []
+let ringrtcLinkerSettings: [LinkerSetting] =
+    useRingRTC
+    ? [
+        .unsafeFlags(
+            ["-L\(ringrtcLibDir)", "-L\(webrtcLibDir)"],
+            .when(platforms: [.macOS])
+        )
+    ] : []
+
 // Linux verification lane only (see CI-LANE.md): GRDB and CryptoKit swaps
 // mirror Packages/SignalStorage and Packages/SignalCore manifests; macOS
 // resolves exactly what it did before. SignalApp, SignalCallsSpike (RingRTC)
@@ -63,11 +87,6 @@ let package = Package(
                 .product(name: "SignalCore", package: "SignalCore"),
                 .product(name: "LibSignalClient", package: "swift"),
                 .product(
-                    name: "SignalCallsSpike",
-                    package: "SignalCallsSpike",
-                    condition: .when(platforms: [.macOS])
-                ),
-                .product(
                     name: "SignalApp",
                     package: "SignalApp",
                     condition: .when(platforms: [.macOS])
@@ -77,18 +96,15 @@ let package = Package(
                 "SignalMessaging",
                 "SignalLogging",
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
-            ] + cryptoProducts,
+            ] + cryptoProducts + ringrtcProducts,
             path: "Packages/SignalCore/Harness",
             exclude: ["Vectors"],
+            swiftSettings: ringrtcSwiftSettings,
             linkerSettings: [
                 // libsignal's own manifest links stdc++ on Linux.
                 .linkedLibrary("c++", .when(platforms: [.macOS])),
                 .unsafeFlags(["-L\(ffiLibDir)"]),
-                .unsafeFlags(
-                    ["-L\(ringrtcLibDir)", "-L\(webrtcLibDir)"],
-                    .when(platforms: [.macOS])
-                ),
-            ]
+            ] + ringrtcLinkerSettings
         ),
         .executableTarget(
             name: "SignalMac",
@@ -96,11 +112,8 @@ let package = Package(
             path: "Apps/SignalMac",
             linkerSettings: [
                 .linkedLibrary("c++"),
-                .unsafeFlags([
-                    "-L\(ffiLibDir)",
-                    "-L\(ringrtcLibDir)",
-                    "-L\(webrtcLibDir)",
-                ]),
+                // The app links libsignal only; RingRTC/WebRTC are harness-only.
+                .unsafeFlags(["-L\(ffiLibDir)"]),
             ]
         ),
     ]

@@ -11,6 +11,7 @@ import SwiftUI
 @main
 struct SignalMacApp: App {
     @StateObject private var state: AppState = {
+        AppLogging.install()
         let environment = (try? AppEnvironment.resolve(
             arguments: Array(CommandLine.arguments.dropFirst()),
             environment: ProcessInfo.processInfo.environment
@@ -24,6 +25,11 @@ struct SignalMacApp: App {
         }
         .commands {
             SidebarCommands()
+            CommandGroup(after: .appInfo) {
+                Button("Reveal Log in Finder") {
+                    AppLogging.revealLogInFinder()
+                }
+            }
         }
     }
 }

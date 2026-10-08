@@ -96,7 +96,11 @@ public struct LiveChatConnector: ChatConnector {
                 // AuthenticatedChatConnection is Sendable; disconnecting
                 // makes libsignal call connectionWasInterrupted, which
                 // finishes the stream.
-                try? await connection.disconnect()
+                do {
+                    try await connection.disconnect()
+                } catch {
+                    ChatSession.logger.error("socket close failed: \(ErrorReason.describe(error))")
+                }
                 continuation.finish()
             },
             send: { request in
@@ -143,7 +147,7 @@ private final class IncomingBridge: ChatConnectionListener {
 
     func connectionWasInterrupted(_ service: AuthenticatedChatConnection, error: Error?) {
         if let error {
-            ChatSession.logger.error("socket interrupted (\(type(of: error)))")
+            ChatSession.logger.error("socket interrupted: \(ErrorReason.describe(error))")
         } else {
             ChatSession.logger.info("socket closed")
         }
@@ -247,7 +251,7 @@ public actor ChatSession {
                 finishOutput()
                 throw ChatSessionError.deviceUnlinked
             }
-            Self.logger.error("connect failed (\(type(of: error)))")
+            Self.logger.error("connect failed: \(ErrorReason.describe(error))")
             throw error
         }
         Self.logger.info("connected")
@@ -356,7 +360,7 @@ public actor ChatSession {
                     setState(.deviceUnlinked)
                     return
                 }
-                Self.logger.error("reconnect failed (\(type(of: error)))")
+                Self.logger.error("reconnect failed: \(ErrorReason.describe(error))")
                 continue
             }
         }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
+import SignalLogging
 import SignalStorage
 
 public struct Profile: Sendable, Equatable {
@@ -51,6 +52,8 @@ public final class ProfileFetcher: @unchecked Sendable {
 /// stay local. Real address-book providers arrive with later phases; import
 /// takes scripted entries (merging by ACI, never duplicating).
 public final class ContactStore: Sendable {
+    private static let logger = Logger(subsystem: "contacts", category: "store")
+
     private let contacts: ContactTable
     private let profiles: ProfileFetcher
 
@@ -96,7 +99,14 @@ public final class ContactStore: Sendable {
     /// Synchronous table-only lookup for view rendering (no fetch).
     /// Falls back to the raw ACI; use `displayName(for:)` to resolve.
     public func cachedName(for aci: String) -> String {
-        guard let row = try? contacts.fetch(aci: aci) else {
+        let row: StoredContact?
+        do {
+            row = try contacts.fetch(aci: aci)
+        } catch {
+            Self.logger.error("contact lookup failed: \(ErrorReason.describe(error))")
+            return aci
+        }
+        guard let row else {
             return aci
         }
         if let name = row.name, !name.isEmpty {
