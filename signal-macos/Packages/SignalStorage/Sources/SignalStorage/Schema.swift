@@ -8,7 +8,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -62,6 +62,40 @@ public enum MigrationChain {
                 t.column("body", .text).notNull()
                 t.column("timestamp", .integer).notNull()
                 t.uniqueKey(["sender_aci", "timestamp"])
+            }
+        }
+        migrator.registerMigration("v3-phase2") { db in
+            try db.create(table: "conversations") { t in
+                t.column("id", .text).primaryKey()
+                t.column("kind", .text).notNull()
+                t.column("name", .text)
+                t.column("unread", .integer).notNull().defaults(to: 0)
+                t.column("muted", .integer).notNull().defaults(to: 0)
+                t.column("last_message_ts", .integer).notNull().defaults(to: 0)
+            }
+            try db.create(table: "contacts") { t in
+                t.column("aci", .text).primaryKey()
+                t.column("name", .text)
+                t.column("phone", .text)
+                t.column("profile_name", .text)
+                t.column("avatar_url", .text)
+            }
+            try db.create(table: "group_state") { t in
+                t.column("master_key", .blob).primaryKey()
+                t.column("revision", .integer).notNull()
+                t.column("members_json", .text).notNull()
+            }
+            try db.create(table: "attachments") { t in
+                t.column("message_id", .integer).notNull()
+                t.column("cdn_key", .text).notNull()
+                t.column("digest", .blob).notNull()
+                t.column("size", .integer).notNull()
+                t.column("content_type", .text).notNull()
+                t.primaryKey(["message_id", "cdn_key"])
+            }
+            try db.create(virtualTable: "messages_fts", using: FTS5()) { t in
+                t.synchronize(withTable: "messages")
+                t.column("body")
             }
         }
         return migrator

@@ -80,6 +80,7 @@ await runAsync("MessagingTests") {
     await runChatSessionTests()
     await runSessionSetupTests()
     await runUnknownSenderTests()
+    await runContactTests()
 }
 
 exit(checkResult())
