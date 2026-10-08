@@ -24,11 +24,6 @@ let package = Package(
         .package(path: "../SignalCallsSpike"),
         .package(path: "../SignalApp"),
         .package(path: "../SignalStorage"),
-        // Test-only: keep revision in sync with SignalStorage/Package.swift.
-        .package(
-            url: "https://github.com/Kizotis/grdb-sqlcipher.git",
-            revision: "fa02b419f8b112b57709fc9b9fdeb4a565d68865"
-        ),
     ],
     targets: [
         .target(
@@ -37,19 +32,6 @@ let package = Package(
                 .product(name: "LibSignalClient", package: "swift"),
                 "SignalStorage",
             ],
-            linkerSettings: [.unsafeFlags(["-L\(ffiLibDir)"])]
-        ),
-        .executableTarget(
-            name: "SpikeHarness",
-            dependencies: [
-                "SignalCore",
-                .product(name: "LibSignalClient", package: "swift"),
-                .product(name: "SignalCallsSpike", package: "SignalCallsSpike"),
-                "SignalApp",
-                "SignalStorage",
-                .product(name: "GRDB", package: "grdb-sqlcipher"),
-            ],
-            path: "Harness",
             linkerSettings: [.unsafeFlags(["-L\(ffiLibDir)"])]
         ),
     ]

@@ -4,12 +4,10 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// Workspace root: mirrors Packages/SignalCore by path so that
-// `swift run SpikeHarness` here executes the package's checks.
-// Keep dependencies/linker settings in sync with
-// Packages/SignalCore/Package.swift. Paths are relative to this file and
-// correct when swift runs from this directory (the documented lane);
-// third-party checkouts must live at these spots (see CI-LANE.md).
+// Workspace root: owns the harness + app executables; every package is a
+// path dependency (single manifest ownership — targets are declared once,
+// in their own package). Run swift from this directory (the documented
+// lane); third-party checkouts must live at these spots (see CI-LANE.md).
 let thirdParty = "../.superpowers/sdd/2026-10-07-native-swift-spike/third-party"
 let libsignalSwiftPath = thirdParty + "/libsignal/swift"
 let ffiLibDir = thirdParty + "/libsignal/target/debug"
@@ -21,6 +19,7 @@ let package = Package(
     platforms: [.macOS(.v13)],
     dependencies: [
         .package(path: libsignalSwiftPath),
+        .package(path: "Packages/SignalCore"),
         .package(path: "Packages/SignalCallsSpike"),
         .package(path: "Packages/SignalApp"),
         .package(path: "Packages/SignalStorage"),
@@ -30,26 +29,19 @@ let package = Package(
             url: "https://github.com/Kizotis/grdb-sqlcipher.git",
             revision: "fa02b419f8b112b57709fc9b9fdeb4a565d68865"
         ),
+        .package(path: "Packages/SignalMessaging"),
     ],
     targets: [
-        .target(
-            name: "SignalCore",
-            dependencies: [
-                .product(name: "LibSignalClient", package: "swift"),
-                "SignalStorage",
-            ],
-            path: "Packages/SignalCore/Sources/SignalCore",
-            linkerSettings: [.unsafeFlags(["-L\(ffiLibDir)"])]
-        ),
         .executableTarget(
             name: "SpikeHarness",
             dependencies: [
-                "SignalCore",
+                .product(name: "SignalCore", package: "SignalCore"),
                 .product(name: "LibSignalClient", package: "swift"),
                 .product(name: "SignalCallsSpike", package: "SignalCallsSpike"),
                 "SignalApp",
                 "SignalStorage",
                 .product(name: "GRDB", package: "grdb-sqlcipher"),
+                "SignalMessaging",
             ],
             path: "Packages/SignalCore/Harness",
             linkerSettings: [

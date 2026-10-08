@@ -13,11 +13,21 @@ public struct DeviceCredentials: Sendable, Equatable {
     public let aci: String
     public let deviceId: UInt32
     public let password: String
+    /// The server these credentials belong to. Credentials are inherently
+    /// per-environment (issued by one chat service); default staging keeps
+    /// existing call sites safe.
+    public let environment: Net.Environment
 
-    public init(aci: String, deviceId: UInt32, password: String) {
+    public init(
+        aci: String,
+        deviceId: UInt32,
+        password: String,
+        environment: Net.Environment = .staging
+    ) {
         self.aci = aci
         self.deviceId = deviceId
         self.password = password
+        self.environment = environment
     }
 }
 

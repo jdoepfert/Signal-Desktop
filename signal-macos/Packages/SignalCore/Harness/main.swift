@@ -76,4 +76,8 @@ await runAsync("AppTests") {
     await runAppTests()
 }
 
+await runAsync("MessagingTests") {
+    await runChatSessionTests()
+}
+
 exit(checkResult())
