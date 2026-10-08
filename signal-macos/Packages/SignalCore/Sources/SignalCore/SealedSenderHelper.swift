@@ -53,11 +53,25 @@ public func sealedSenderEncrypt(
     )
 }
 
+/// Validates `certificate` against any of `trustRoots` at `nowMs`
+/// (milliseconds since the epoch, as libsignal and the certificate's
+/// `expiration` use). Throws `untrustedSender` when no root validates it,
+/// including when `trustRoots` is empty.
+public func validateSenderCertificate(
+    _ certificate: SenderCertificate,
+    trustRoots: [PublicKey],
+    nowMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000)
+) throws {
+    for root in trustRoots where certificate.validate(trustRoot: root, time: nowMs) {
+        return
+    }
+    throw SealedSenderHelperError.untrustedSender
+}
+
 /// Decrypts a sealed-sender envelope without a prior sender expectation.
 /// Returns the plaintext and the sender ACI from the sender certificate.
 /// Each trust root is tried in order; the first validation wins. An EMPTY
-/// list skips validation entirely — staging-only escape hatch (staging
-/// roots are unpublished; production must always pass its roots).
+/// list is an error: there is no way to skip validation.
 /// New API for the message pipe; `sealedSenderDecrypt` below keeps its
 /// exact signature and delegates to this.
 public func sealedSenderDecryptUnknownSender(
@@ -72,17 +86,7 @@ public func sealedSenderDecryptUnknownSender(
         identityStore: recipientStore,
         context: context
     )
-    let now = UInt64(Date().timeIntervalSince1970)
-    var validated = trustRoots.isEmpty
-    for root in trustRoots {
-        if content.senderCertificate.validate(trustRoot: root, time: now) {
-            validated = true
-            break
-        }
-    }
-    guard validated else {
-        throw SealedSenderHelperError.untrustedSender
-    }
+    try validateSenderCertificate(content.senderCertificate, trustRoots: trustRoots)
     let senderAci = content.senderCertificate.sender.uuidString
     let sender = try ProtocolAddress(
         name: senderAci,

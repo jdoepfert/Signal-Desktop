@@ -80,17 +80,15 @@ public final class AppState: ObservableObject {
             for await event in session.events {
                 switch event {
                 case .address(let address):
-                    self.address = address
+                    self.address = Provisioning.linkURL(
+                        address: address,
+                        publicKey: ourKey.publicKey
+                    ).absoluteString
                 case .envelope(let envelope):
-                    let data = try Provisioning.decryptEnvelopeData(
-                        envelope,
-                        ourPrivateKeyBytes: ourKey.serialize()
-                    )
+                    let account = try Provisioning(ourPrivateKey: ourKey)
+                        .decrypt(envelope: envelope)
                     try? await session.disconnect()
-                    try await self.registerAndBuild(
-                        provisioningCode: data.provisioningCode,
-                        aci: data.aci
-                    )
+                    try await self.registerAndBuild(account: account)
                     return
                 }
             }
@@ -177,7 +175,7 @@ public final class AppState: ObservableObject {
         }
     }
 
-    private func registerAndBuild(provisioningCode: String, aci: String) async throws {
+    private func registerAndBuild(account: ProvisionedAccount) async throws {
         let netEnv: Net.Environment = environment == .production ? .production : .staging
         let net = Net(env: netEnv, userAgent: "signal-macos/0.0.0", buildVariant: .production)
         let unauth = try await net.connectUnauthenticatedChat()
@@ -196,13 +194,10 @@ public final class AppState: ObservableObject {
         let registration = LinkedDeviceRegistration(
             transport: LiveRegistrationTransport(connection: unauth),
             store: protocolStore,
+            identityStore: identityStore,
             accounts: AccountTable(queue: database.queue)
         )
-        let creds = try await registration.register(
-            provisioningCode: provisioningCode,
-            aci: aci,
-            environment: netEnv
-        )
+        let creds = try await registration.register(account: account, environment: netEnv)
 
         let certFetcher = SenderCertFetcher(fetch: { [unauth] path in
             let response = try await unauth.send(
@@ -237,7 +232,7 @@ public final class AppState: ObservableObject {
             certs: certs,
             store: protocolStore,
             ourAddress: try ProtocolAddress(name: creds.aci, deviceId: creds.deviceId),
-            trustRoots: try Self.serverTrustRoots(environment: environment),
+            trustRoots: TrustRoots.forEnvironment(environment),
             incomingSource: nil,
             messages: messages,
             devicesForRecipient: { recipient in
@@ -377,25 +372,5 @@ public final class AppState: ObservableObject {
         let key = Data(bytes).base64EncodedString()
         try KeychainStore.save(Data(key.utf8), service: "org.signal.signal-mac", account: account)
         return key
-    }
-
-    /// Server trust roots for sender-certificate validation, from Desktop's
-    /// public config (`config/production.json#serverTrustRoots`). Staging
-    /// roots are unpublished, so staging skips validation loudly (empty
-    /// list) until they are observed live.
-    private static func serverTrustRoots(environment: AppEnvironment) throws -> [PublicKey] {
-        guard environment == .production else {
-            return []
-        }
-        let roots = [
-            "BXu6QIKVz5MA8gstzfOgRQGqyLqOwNKHL6INkv3IHWMF",
-            "BUkY0I+9+oPgDCn4+Ac6Iu813yvqkDr/ga8DzLxFxuk6",
-        ]
-        return try roots.map { root in
-            guard let bytes = Data(base64Encoded: root) else {
-                throw ProvisioningError.envelopeInvalid
-            }
-            return try PublicKey(bytes)
-        }
     }
 }

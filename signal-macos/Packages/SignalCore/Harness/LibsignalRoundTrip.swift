@@ -97,7 +97,7 @@ private func makeSenderCert(
     let cert = try SenderCertificate(
         sender: senderAddress,
         publicKey: senderIdentity.publicKey,
-        expiration: UInt64(Date().timeIntervalSince1970) + 86400,
+        expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
         signerCertificate: serverCert,
         signerKey: serverKeys.privateKey
     )

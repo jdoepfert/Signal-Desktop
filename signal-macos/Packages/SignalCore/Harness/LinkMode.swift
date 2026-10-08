@@ -42,14 +42,11 @@ private func runLinkSession() async throws -> Int32 {
         switch event {
         case .address(let address):
             print("ADDRESS \(address)")
+            print("LINK \(Provisioning.linkURL(address: address, publicKey: ours.publicKey))")
             print("Scan the QR for this address, then approve on the primary device.")
         case .envelope(let envelope):
-            let privateBytes = ours.serialize()
-            let aci = try Provisioning.decryptEnvelope(
-                envelope,
-                ourPrivateKeyBytes: privateBytes
-            )
-            print("LINKED aci=\(aci)")
+            let account = try Provisioning(ourPrivateKey: ours).decrypt(envelope: envelope)
+            print("LINKED aci=\(account.aci)")
             try? await session.disconnect()
             return 0
         }

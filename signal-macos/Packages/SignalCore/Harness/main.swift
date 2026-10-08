@@ -54,6 +54,7 @@ run("RingRTCTests") {
 await runAsync("MessagePipeTests") {
     await runMessagePipeTests()
     await runPersistedReceiveTests()
+    await runCertValidationTests()
 }
 
 #if os(macOS)

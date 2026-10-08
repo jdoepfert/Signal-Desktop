@@ -8,6 +8,7 @@ import Crypto
 #endif
 import Foundation
 import LibSignalClient
+import SwiftProtobuf
 
 // Linked-device credentials. The deviceId is assigned by the chat service
 // during provisioning-code verification (Phase 1); the spike takes it as
@@ -52,92 +53,6 @@ public enum ProvisioningError: Error, Equatable {
     case timedOut
 }
 
-/// Minimal proto2 reader: fields keyed by field number, preserving both
-/// length-delimited payloads and varint values.
-enum ProtoValue: Equatable {
-    case bytes(Data)
-    case varint(UInt64)
-}
-
-enum ProtoFields {
-    static func parse(_ data: Data) throws -> [Int: ProtoValue] {
-        var fields = [Int: ProtoValue]()
-        var index = data.startIndex
-        while index < data.endIndex {
-            let (tag, afterTag) = try readVarint(data, from: index)
-            index = afterTag
-            let fieldNumber = Int(tag >> 3)
-            switch tag & 0x07 {
-            case 0:
-                let (value, afterValue) = try readVarint(data, from: index)
-                fields[fieldNumber] = .varint(value)
-                index = afterValue
-            case 1:
-                guard let end = data.index(index, offsetBy: 8, limitedBy: data.endIndex),
-                      end == data.index(index, offsetBy: 8)
-                else {
-                    throw ProvisioningError.envelopeInvalid
-                }
-                index = end
-            case 2:
-                let (count, afterCount) = try readVarint(data, from: index)
-                guard let end = data.index(
-                    afterCount,
-                    offsetBy: Int(count),
-                    limitedBy: data.endIndex
-                ),
-                      data.distance(from: afterCount, to: end) == Int(count)
-                else {
-                    throw ProvisioningError.envelopeInvalid
-                }
-                fields[fieldNumber] = .bytes(data[afterCount..<end])
-                index = end
-            case 5:
-                guard let end = data.index(index, offsetBy: 4, limitedBy: data.endIndex),
-                      data.distance(from: index, to: end) == 4
-                else {
-                    throw ProvisioningError.envelopeInvalid
-                }
-                index = end
-            default:
-                throw ProvisioningError.envelopeInvalid
-            }
-        }
-        return fields
-    }
-
-    static func readVarint(_ data: Data, from index: Data.Index) throws -> (UInt64, Data.Index) {
-        var result: UInt64 = 0
-        var shift = 0
-        var index = index
-        while true {
-            guard index < data.endIndex, shift < 64 else {
-                throw ProvisioningError.envelopeInvalid
-            }
-            let byte = data[index]
-            index = data.index(after: index)
-            result |= UInt64(byte & 0x7F) << shift
-            if byte & 0x80 == 0 {
-                return (result, index)
-            }
-            shift += 7
-        }
-    }
-
-    static func uuidString(_ bytes: Data) -> String? {
-        guard bytes.count == 16 else {
-            return nil
-        }
-        let hex = bytes.map { String(format: "%02x", $0) }.joined()
-        func part(_ from: Int, _ to: Int) -> String {
-            let start = hex.index(hex.startIndex, offsetBy: from)
-            let end = hex.index(hex.startIndex, offsetBy: to)
-            return String(hex[start..<end])
-        }
-        return "\(part(0, 8))-\(part(8, 12))-\(part(12, 16))-\(part(16, 20))-\(part(20, 32))"
-    }
-}
-
 /// Secondary-device provisioning: decrypts the ProvisionEnvelope delivered
 /// over the provisioning WebSocket. Mirrors
 /// ts/textsecure/ProvisioningCipher.node.ts.
@@ -157,102 +72,179 @@ public struct Provisioning: Sendable {
     }
 }
 
-/// Decrypted provisioning payload: identity plus the verification code
-/// the server expects back during linked-device registration.
-public struct ProvisionEnvelopeData: Sendable, Equatable {
+/// Everything the primary device hands over during linking: account
+/// identity (ACI and PNI), the profile key, and the one-time code the chat
+/// service expects back in `PUT v1/devices/link`.
+public struct ProvisionedAccount: Sendable {
     public let aci: String
+    public let pni: String
+    public let aciIdentity: IdentityKeyPair
+    public let pniIdentity: IdentityKeyPair
+    public let profileKey: Data
     public let provisioningCode: String
+    public let number: String
 
-    public init(aci: String, provisioningCode: String) {
+    public init(
+        aci: String,
+        pni: String,
+        aciIdentity: IdentityKeyPair,
+        pniIdentity: IdentityKeyPair,
+        profileKey: Data,
+        provisioningCode: String,
+        number: String
+    ) {
         self.aci = aci
+        self.pni = pni
+        self.aciIdentity = aciIdentity
+        self.pniIdentity = pniIdentity
+        self.profileKey = profileKey
         self.provisioningCode = provisioningCode
+        self.number = number
     }
 }
 
+/// Registration ids are drawn from 1..<16383 (ts/Crypto.node.ts:44).
+public func generateRegistrationId() -> UInt32 {
+    UInt32.random(in: 1..<16383)
+}
+
 extension Provisioning {
+    /// The device-link QR payload, mirroring `linkDeviceRoute.toAppUrl` in
+    /// ts/util/signalRoutes.std.ts: `URLSearchParams` over standard base64
+    /// (with padding) of the type-prefixed public key, so `+ / = ,` are
+    /// percent-encoded.
+    public static func linkURL(address: String, publicKey: PublicKey) -> URL {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "*-._")
+        func encode(_ value: String) -> String {
+            value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+        }
+        let query = [
+            ("uuid", address),
+            ("pub_key", publicKey.serialize().base64EncodedString()),
+            ("capabilities", "nopni,nopni2"),
+        ]
+        .map { "\($0.0)=\(encode($0.1))" }
+        .joined(separator: "&")
+        // Every component is percent-encoded above, so this cannot fail.
+        return URL(string: "sgnl://linkdevice?\(query)")!
+    }
+
     /// Decrypts `envelopeData` and returns credentials for `deviceId`.
     /// Async for forward compatibility with the transport-driven flow;
     /// the offline decrypt itself does not suspend.
     public func link(envelopeData: Data, deviceId: UInt32) async throws -> DeviceCredentials {
-        let aci = try Self.decryptEnvelope(envelopeData, ourPrivateKeyBytes: privateKeyBytes)
+        let message = try decryptMessage(envelopeData)
         return DeviceCredentials(
-            aci: aci,
+            aci: try Self.aci(of: message),
             deviceId: deviceId,
             password: Self.randomPassword()
         )
     }
 
-    /// Decrypts the envelope and returns identity + verification code.
-    /// The code is required: registration is impossible without it.
-    public static func decryptEnvelopeData(
-        _ envelopeData: Data,
-        ourPrivateKeyBytes: Data
-    ) throws -> ProvisionEnvelopeData {
-        let message = try decryptMessageFields(
-            envelopeData,
-            ourPrivateKeyBytes: ourPrivateKeyBytes
-        )
-        let aci = try extractAci(message)
-        guard case .bytes(let codeData) = message[4],
-              let code = String(data: codeData, encoding: .utf8),
-              !code.isEmpty
+    /// Decrypts the envelope and returns the full account. Every field the
+    /// linked device cannot work without (identities, profile key, code,
+    /// ACI, PNI) is required; anything missing is `envelopeInvalid`.
+    public func decrypt(envelope envelopeData: Data) throws -> ProvisionedAccount {
+        let message = try decryptMessage(envelopeData)
+        let aci = try Self.aci(of: message)
+        let pni = try Self.pni(of: message)
+        guard message.hasProvisioningCode, !message.provisioningCode.isEmpty,
+              message.hasProfileKey, !message.profileKey.isEmpty
         else {
             throw ProvisioningError.envelopeInvalid
         }
-        return ProvisionEnvelopeData(aci: aci, provisioningCode: code)
+        do {
+            let aciIdentity = try Self.identity(
+                public: message.aciIdentityKeyPublic,
+                private: message.aciIdentityKeyPrivate
+            )
+            let pniIdentity = try Self.identity(
+                public: message.pniIdentityKeyPublic,
+                private: message.pniIdentityKeyPrivate
+            )
+            return ProvisionedAccount(
+                aci: aci,
+                pni: pni,
+                aciIdentity: aciIdentity,
+                pniIdentity: pniIdentity,
+                profileKey: message.profileKey,
+                provisioningCode: message.provisioningCode,
+                number: message.number
+            )
+        } catch {
+            throw ProvisioningError.envelopeInvalid
+        }
     }
 
-    private static func extractAci(_ message: [Int: ProtoValue]) throws -> String {
-        // Desktop precedence (ProvisioningCipher.node.ts): binary first.
-        if case .bytes(let binary) = message[17],
-           let aci = ProtoFields.uuidString(binary)
-        {
+    /// A key pair whose halves must agree: a mismatched pair would sign
+    /// prekeys the server (and peers) cannot verify.
+    private static func identity(public publicBytes: Data, private privateBytes: Data) throws
+        -> IdentityKeyPair
+    {
+        let publicKey = try PublicKey(publicBytes)
+        let privateKey = try PrivateKey(privateBytes)
+        guard privateKey.publicKey.serialize() == publicKey.serialize() else {
+            throw ProvisioningError.envelopeInvalid
+        }
+        return IdentityKeyPair(publicKey: publicKey, privateKey: privateKey)
+    }
+
+    private static func uuidString(_ bytes: Data) -> String? {
+        guard bytes.count == 16 else {
+            return nil
+        }
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        func part(_ from: Int, _ to: Int) -> String {
+            let start = hex.index(hex.startIndex, offsetBy: from)
+            let end = hex.index(hex.startIndex, offsetBy: to)
+            return String(hex[start..<end])
+        }
+        return "\(part(0, 8))-\(part(8, 12))-\(part(12, 16))-\(part(16, 20))-\(part(20, 32))"
+    }
+
+    /// Desktop precedence (ProvisioningCipher.node.ts): binary first.
+    private static func aci(of message: SignalServiceProtos_ProvisionMessage) throws -> String {
+        if message.hasAciBinary, let aci = uuidString(message.aciBinary) {
             return aci
         }
-        if case .bytes(let aciData) = message[8],
-           !aciData.isEmpty,
-           let aci = String(data: aciData, encoding: .utf8),
-           UUID(uuidString: aci) != nil
-        {
-            return aci
+        if message.hasAci, UUID(uuidString: message.aci) != nil {
+            return message.aci
         }
         throw ProvisioningError.envelopeInvalid
     }
 
-    /// Decrypts the envelope and returns the account ACI. Public so the
-    /// transport layer and manual tooling can use it without minting
-    /// credentials (the device id is server-assigned during verification).
-    public static func decryptEnvelope(
-        _ envelopeData: Data,
-        ourPrivateKeyBytes: Data
-    ) throws -> String {
-        let message = try decryptMessageFields(
-            envelopeData,
-            ourPrivateKeyBytes: ourPrivateKeyBytes
-        )
-        return try extractAci(message)
+    /// Same precedence for the PNI (binary first). The string form is the
+    /// untagged UUID Desktop also accepts.
+    private static func pni(of message: SignalServiceProtos_ProvisionMessage) throws -> String {
+        if message.hasPniBinary, let pni = uuidString(message.pniBinary) {
+            return pni
+        }
+        if message.hasPni, UUID(uuidString: message.pni) != nil {
+            return message.pni
+        }
+        throw ProvisioningError.envelopeInvalid
     }
 
-    static func decryptMessageFields(
-        _ envelopeData: Data,
-        ourPrivateKeyBytes: Data
-    ) throws -> [Int: ProtoValue] {
-        let envelope: [Int: ProtoValue]
+    private func decryptMessage(
+        _ envelopeData: Data
+    ) throws -> SignalServiceProtos_ProvisionMessage {
+        let envelope: SignalServiceProtos_ProvisionEnvelope
         do {
-            envelope = try ProtoFields.parse(envelopeData)
+            envelope = try SignalServiceProtos_ProvisionEnvelope(serializedBytes: envelopeData)
         } catch {
             throw ProvisioningError.envelopeInvalid
         }
-        guard case .bytes(let ephemeralBytes) = envelope[1],
-              case .bytes(let body) = envelope[2]
-        else {
+        guard envelope.hasPublicKey, envelope.hasBody else {
             throw ProvisioningError.envelopeInvalid
         }
+        let ephemeralBytes = envelope.publicKey
+        let body = envelope.body
 
         let ourPrivateKey: PrivateKey
         let ephemeralPublicKey: PublicKey
         do {
-            ourPrivateKey = try PrivateKey(ourPrivateKeyBytes)
+            ourPrivateKey = try PrivateKey(privateKeyBytes)
             ephemeralPublicKey = try PublicKey(ephemeralBytes)
         } catch {
             throw ProvisioningError.envelopeInvalid
@@ -285,7 +277,7 @@ extension Provisioning {
                 using: SymmetricKey(data: Data(macKey))
             )
         )
-        guard constantTimeEqual(ourMac, Data(theirMac)) else {
+        guard Self.constantTimeEqual(ourMac, Data(theirMac)) else {
             throw ProvisioningError.envelopeExpired
         }
 
@@ -303,7 +295,7 @@ extension Provisioning {
         }
 
         do {
-            return try ProtoFields.parse(plaintext)
+            return try SignalServiceProtos_ProvisionMessage(serializedBytes: plaintext)
         } catch {
             throw ProvisioningError.envelopeInvalid
         }

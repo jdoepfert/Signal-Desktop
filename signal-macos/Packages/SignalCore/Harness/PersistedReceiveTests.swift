@@ -20,7 +20,13 @@ func runPersistedReceiveTests() async {
         let grdbSenderKeys = GRDBSenderKeyStore(queue: db.queue)
         let messages = MessageStore(queue: db.queue)
 
-        // Bob's identity first (the bundle references it).
+        // Bob's identity first (the bundle references it): stored the way
+        // linking stores it; the store never generates one.
+        try grdbIdentity.storeAccountIdentity(
+            aci: IdentityKeyPair.generate(),
+            pni: IdentityKeyPair.generate(),
+            registrationId: generateRegistrationId()
+        )
         let bobIdentity = try grdbIdentity.identityKeyPair(context: context)
         let bobAddress = try ProtocolAddress(name: persistedBob, deviceId: 1)
         let aliceAddress = try ProtocolAddress(name: persistedAlice, deviceId: 1)
@@ -93,7 +99,7 @@ func runPersistedReceiveTests() async {
                 deviceId: 1
             ),
             publicKey: aliceStore.identityKeyPair(context: context).publicKey,
-            expiration: UInt64(Date().timeIntervalSince1970) + 86400,
+            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
             signerCertificate: ServerCertificate(
                 keyId: 1,
                 publicKey: serverKeys.publicKey,
@@ -155,6 +161,87 @@ func runPersistedReceiveTests() async {
         )
     } catch {
         check("MessagePipeTests.testPersistedReceive", false, "\(error)")
+    }
+}
+
+// Certificate validation: expirations are MILLISECONDS since the epoch
+// (libsignal compares against the `time` argument directly), an empty root
+// list is an error, and the staging roots parse.
+func runCertValidationTests() async {
+    do {
+        let root = IdentityKeyPair.generate()
+        let serverKeys = IdentityKeyPair.generate()
+        let signerCert = try ServerCertificate(
+            keyId: 1,
+            publicKey: serverKeys.publicKey,
+            trustRoot: root.privateKey
+        )
+        let senderKey = IdentityKeyPair.generate().publicKey
+        func mint(expiration: UInt64) throws -> SenderCertificate {
+            try SenderCertificate(
+                sender: SealedSenderAddress(
+                    e164: nil,
+                    uuidString: persistedAlice,
+                    deviceId: 1
+                ),
+                publicKey: senderKey,
+                expiration: expiration,
+                signerCertificate: signerCert,
+                signerKey: serverKeys.privateKey
+            )
+        }
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        let expired = try mint(expiration: nowMs - 1)
+        let fresh = try mint(expiration: nowMs + 60_000)
+        func validates(_ cert: SenderCertificate) -> Bool {
+            do {
+                try validateSenderCertificate(cert, trustRoots: [root.publicKey])
+                return true
+            } catch {
+                return false
+            }
+        }
+        check(
+            "PersistedReceiveTests.testExpiredCertRejected",
+            !validates(expired) && validates(fresh)
+        )
+    } catch {
+        check("PersistedReceiveTests.testExpiredCertRejected", false, "\(error)")
+    }
+
+    // Validation with NO configured roots fails; there is no skip path.
+    do {
+        let root = IdentityKeyPair.generate()
+        let serverKeys = IdentityKeyPair.generate()
+        let cert = try SenderCertificate(
+            sender: SealedSenderAddress(e164: nil, uuidString: persistedAlice, deviceId: 1),
+            publicKey: IdentityKeyPair.generate().publicKey,
+            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 60_000,
+            signerCertificate: ServerCertificate(
+                keyId: 1,
+                publicKey: serverKeys.publicKey,
+                trustRoot: root.privateKey
+            ),
+            signerKey: serverKeys.privateKey
+        )
+        var threw = false
+        do {
+            try validateSenderCertificate(cert, trustRoots: [])
+        } catch SealedSenderHelperError.untrustedSender {
+            threw = true
+        }
+        check("PersistedReceiveTests.testEmptyTrustRootsThrows", threw)
+    } catch {
+        check("PersistedReceiveTests.testEmptyTrustRootsThrows", false, "\(error)")
+    }
+
+    do {
+        let staging = TrustRoots.forEnvironment(.staging)
+        let production = TrustRoots.forEnvironment(.production)
+        check(
+            "PersistedReceiveTests.testStagingRootsParse",
+            staging.count == 2 && production.count == 2
+        )
     }
 }
 

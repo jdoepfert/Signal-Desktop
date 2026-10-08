@@ -36,6 +36,27 @@ final class FakeRegistrationTransport: RegistrationTransport, @unchecked Sendabl
     }
 }
 
+private func makeAccount(code: String = "123-456") -> ProvisionedAccount {
+    ProvisionedAccount(
+        aci: "9d0652a3-dcc3-4d11-975f-74d61598733f",
+        pni: "66666666-7777-4888-9999-000000000000",
+        aciIdentity: IdentityKeyPair.generate(),
+        pniIdentity: IdentityKeyPair.generate(),
+        profileKey: Data(repeating: 9, count: 32),
+        provisioningCode: code,
+        number: "+15555550100"
+    )
+}
+
+private func decodeSignature(_ json: [String: Any]?) -> (key: Data, signature: Data)? {
+    guard let key = (json?["publicKey"] as? String).flatMap({ Data(base64Encoded: $0) }),
+          let signature = (json?["signature"] as? String).flatMap({ Data(base64Encoded: $0) })
+    else {
+        return nil
+    }
+    return (key, signature)
+}
+
 func runLinkedRegistrationTests() async {
     // Happy path: request shape pinned, credentials returned + persisted,
     // key material stored for future sessions.
@@ -43,17 +64,16 @@ func runLinkedRegistrationTests() async {
         let db = try SignalDatabase.open(path: nil, key: "k")
         let store = InMemorySignalProtocolStore()
         let accounts = AccountTable(queue: db.queue)
+        let identities = GRDBIdentityStore(queue: db.queue)
+        let account = makeAccount()
         let transport = FakeRegistrationTransport()
         let registration = LinkedDeviceRegistration(
             transport: transport,
             store: store,
+            identityStore: identities,
             accounts: accounts
         )
-        let creds = try await registration.register(
-            provisioningCode: "123-456",
-            aci: "9d0652a3-dcc3-4d11-975f-74d61598733f",
-            environment: .staging
-        )
+        let creds = try await registration.register(account: account, environment: .staging)
         let put = transport.recorded.first!
         let auth = put.headers["Authorization"] ?? ""
         let authPayload = String(
@@ -66,6 +86,33 @@ func runLinkedRegistrationTests() async {
         let context = NullContext()
         let signedStored = try? store.loadSignedPreKey(id: 1, context: context)
         let kyberStored = try? store.loadKyberPreKey(id: 1, context: context)
+        // Identity, profile key and registration ids landed in the store,
+        // and each service's prekeys are signed by that service's identity.
+        let aciSigned = decodeSignature(body?["aciSignedPreKey"] as? [String: Any])
+        let aciKyber = decodeSignature(body?["aciPqLastResortPreKey"] as? [String: Any])
+        let pniSigned = decodeSignature(body?["pniSignedPreKey"] as? [String: Any])
+        let pniKyber = decodeSignature(body?["pniPqLastResortPreKey"] as? [String: Any])
+        let signingOk = [
+            (aciSigned, account.aciIdentity), (aciKyber, account.aciIdentity),
+            (pniSigned, account.pniIdentity), (pniKyber, account.pniIdentity),
+        ].allSatisfy { parts, identity in
+            guard let parts else {
+                return false
+            }
+            return (try? identity.publicKey.verifySignature(
+                message: parts.key,
+                signature: parts.signature
+            )) ?? false
+        }
+        let storedIdentityOk =
+            (try? identities.identityKeyPair(context: context).serialize())
+                == account.aciIdentity.serialize()
+            && (try? identities.pniIdentityKeyPair().serialize()) == account.pniIdentity.serialize()
+            && (try? identities.profileKey()) == account.profileKey
+            && (try? identities.localRegistrationId(context: context))
+                == (attrs?["registrationId"] as? Int).map { UInt32($0) }
+            && (1..<16383).contains(attrs?["registrationId"] as? Int ?? 0)
+        check("MessagingTests.testLinkedRegistrationStoresIdentityAndSignsPreKeys", signingOk && storedIdentityOk)
         check(
             "MessagingTests.testLinkedRegistration",
             put.path == "v1/devices/link"
@@ -93,19 +140,17 @@ func runLinkedRegistrationTests() async {
         let db = try SignalDatabase.open(path: nil, key: "k")
         let store = InMemorySignalProtocolStore()
         let accounts = AccountTable(queue: db.queue)
+        let identities = GRDBIdentityStore(queue: db.queue)
         let denied = FakeRegistrationTransport()
         denied.status = 403
         let registration = LinkedDeviceRegistration(
             transport: denied,
             store: store,
+            identityStore: identities,
             accounts: accounts
         )
         do {
-            _ = try await registration.register(
-                provisioningCode: "123-456",
-                aci: "9d0652a3-dcc3-4d11-975f-74d61598733f",
-                environment: .staging
-            )
+            _ = try await registration.register(account: makeAccount(), environment: .staging)
             check("MessagingTests.testRegistrationRejected", false, "no error thrown")
         } catch let error as LinkRegistrationError {
             check(
@@ -119,14 +164,11 @@ func runLinkedRegistrationTests() async {
         let badJson = LinkedDeviceRegistration(
             transport: garbage,
             store: store,
+            identityStore: identities,
             accounts: accounts
         )
         do {
-            _ = try await badJson.register(
-                provisioningCode: "123-456",
-                aci: "9d0652a3-dcc3-4d11-975f-74d61598733f",
-                environment: .staging
-            )
+            _ = try await badJson.register(account: makeAccount(), environment: .staging)
             check("MessagingTests.testRegistrationBadJson", false, "no error thrown")
         } catch let error as LinkRegistrationError {
             check("MessagingTests.testRegistrationBadJson", error == .invalidResponse)

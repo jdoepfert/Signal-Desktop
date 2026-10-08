@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
+@_exported import SignalCore
 import SignalLogging
 
 /// Startup phases in fixed order.

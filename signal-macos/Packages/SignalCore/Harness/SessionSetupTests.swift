@@ -102,7 +102,7 @@ func runSessionSetupTests() async {
         let senderCert = try SenderCertificate(
             sender: SealedSenderAddress(e164: nil, uuidString: setupAlice, deviceId: 1),
             publicKey: aliceStore.identityKeyPair(context: context).publicKey,
-            expiration: UInt64(Date().timeIntervalSince1970) + 86400,
+            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
             signerCertificate: ServerCertificate(
                 keyId: 1,
                 publicKey: serverKeys.publicKey,
@@ -222,7 +222,7 @@ func runUnknownSenderTests() async {
         let senderCert = try SenderCertificate(
             sender: SealedSenderAddress(e164: nil, uuidString: setupAlice, deviceId: 1),
             publicKey: aliceStore.identityKeyPair(context: context).publicKey,
-            expiration: UInt64(Date().timeIntervalSince1970) + 86400,
+            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
             signerCertificate: ServerCertificate(
                 keyId: 1,
                 publicKey: serverKeys.publicKey,

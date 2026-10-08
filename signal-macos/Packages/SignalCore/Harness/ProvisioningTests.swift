@@ -271,6 +271,55 @@ private extension Data {
 }
 
 func runProvisioningCodeTests() {
+    // Phone-side envelope from Desktop's own stack (golden vector).
+    do {
+        let vector = try Vectors.load("provisioning")
+        let expected = vector["expected"] as! [String: String]
+        let ours = try PrivateKey(Vectors.data(hex: vector["ourPrivateKey"] as! String)!)
+        let envelope = Vectors.data(hex: vector["envelope"] as! String)!
+        let account = try Provisioning(ourPrivateKey: ours).decrypt(envelope: envelope)
+        check(
+            "ProvisioningTests.testDecryptsAccountKeys",
+            account.aci == expected["aci"]
+                && account.pni == expected["pni"]
+                && account.aciIdentity.publicKey.serialize()
+                    == Vectors.data(hex: expected["aciIdentityPublic"]!)
+                && account.aciIdentity.privateKey.serialize()
+                    == Vectors.data(hex: expected["aciIdentityPrivate"]!)
+                && account.pniIdentity.publicKey.serialize()
+                    == Vectors.data(hex: expected["pniIdentityPublic"]!)
+                && account.pniIdentity.privateKey.serialize()
+                    == Vectors.data(hex: expected["pniIdentityPrivate"]!)
+                && account.profileKey == Vectors.data(hex: expected["profileKey"]!)
+                && account.provisioningCode == expected["provisioningCode"]
+                && account.number == expected["number"]
+        )
+    } catch {
+        check("ProvisioningTests.testDecryptsAccountKeys", false, "\(error)")
+    }
+
+    // The QR payload mirrors linkDeviceRoute.toAppUrl: standard base64
+    // (with padding) of the public key, percent-encoded by URLSearchParams.
+    do {
+        let key = PrivateKey.generate().publicKey
+        let url = Provisioning.linkURL(address: "abc", publicKey: key)
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let items = Dictionary(
+            uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") }
+        )
+        check(
+            "ProvisioningTests.testLinkURLFormat",
+            url.scheme == "sgnl"
+                && url.host == "linkdevice"
+                && items["uuid"] == "abc"
+                && Data(base64Encoded: items["pub_key"] ?? "") == key.serialize()
+                && items["capabilities"] == "nopni,nopni2"
+                && !url.absoluteString.contains("+")
+                && !url.absoluteString.contains("/linkdevice/")
+        )
+    }
+
+    // Missing identity material / code throws (registration is impossible).
     do {
         let ours = PrivateKey.generate()
         let (envelope, _) = try buildEnvelope(
@@ -278,40 +327,17 @@ func runProvisioningCodeTests() {
             ourPublicKey: ours.publicKey,
             provisioningCode: "123-456"
         )
-        let decoded = try Provisioning.decryptEnvelopeData(
-            envelope,
-            ourPrivateKeyBytes: ours.serialize()
-        )
-        check(
-            "ProvisioningTests.testProvisioningCode",
-            decoded.aci == "9d0652a3-dcc3-4d11-975f-74d61598733f"
-                && decoded.provisioningCode == "123-456"
-        )
-    } catch {
-        check("ProvisioningTests.testProvisioningCode", false, "\(error)")
-    }
-
-    // Missing code throws (registration is impossible without it).
-    do {
-        let ours = PrivateKey.generate()
-        let (envelope, _) = try buildEnvelope(
-            aci: "9d0652a3-dcc3-4d11-975f-74d61598733f",
-            ourPublicKey: ours.publicKey
-        )
         do {
-            _ = try Provisioning.decryptEnvelopeData(
-                envelope,
-                ourPrivateKeyBytes: ours.serialize()
-            )
-            check("ProvisioningTests.testMissingCode", false, "no error thrown")
+            _ = try Provisioning(ourPrivateKey: ours).decrypt(envelope: envelope)
+            check("ProvisioningTests.testMissingIdentityKeys", false, "no error thrown")
         } catch let error as ProvisioningError {
             check(
-                "ProvisioningTests.testMissingCode",
+                "ProvisioningTests.testMissingIdentityKeys",
                 error == .envelopeInvalid,
                 "got \(error)"
             )
         }
     } catch {
-        check("ProvisioningTests.testMissingCode", false, "\(error)")
+        check("ProvisioningTests.testMissingIdentityKeys", false, "\(error)")
     }
 }

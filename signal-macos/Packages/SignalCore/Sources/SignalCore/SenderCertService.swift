@@ -13,7 +13,7 @@ public final class SenderCertService: SenderCertProvider, @unchecked Sendable {
     public typealias Fetch = @Sendable () async throws -> SenderCertificate
 
     /// Certificates expiring within this margin are treated as expired.
-    public static let expiryMargin: UInt64 = 3600
+    public static let expiryMargin: UInt64 = 3_600_000
 
     private let fetch: Fetch
     private let lock = NSLock()
@@ -59,7 +59,7 @@ public final class SenderCertService: SenderCertProvider, @unchecked Sendable {
     }
 
     private static func isExpired(_ cert: SenderCertificate) -> Bool {
-        let now = UInt64(Date().timeIntervalSince1970)
-        return cert.expiration <= now + expiryMargin
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        return cert.expiration <= nowMs + expiryMargin
     }
 }

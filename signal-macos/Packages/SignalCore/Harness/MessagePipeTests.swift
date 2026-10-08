@@ -81,7 +81,7 @@ struct PipeFixture {
                 deviceId: 1
             ),
             publicKey: aliceStore.identityKeyPair(context: context).publicKey,
-            expiration: UInt64(Date().timeIntervalSince1970) + 86400,
+            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
             signerCertificate: serverCert,
             signerKey: serverKeys.privateKey
         )
@@ -165,7 +165,7 @@ struct PipeFixture {
                 deviceId: 1
             ),
             publicKey: aliceStore.identityKeyPair(context: context).publicKey,
-            expiration: UInt64(Date().timeIntervalSince1970) + 86400,
+            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
             signerCertificate: serverCert,
             signerKey: serverKeys.privateKey
         )

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
+import SignalCore
 
 public enum UpdateStatus: Sendable, Equatable {
     case noUpdate

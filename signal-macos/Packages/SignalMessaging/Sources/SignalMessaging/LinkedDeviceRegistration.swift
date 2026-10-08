@@ -48,6 +48,7 @@ private struct SignedPreKeyJSON: Encodable {
 private struct AccountAttributesJSON: Encodable {
     let fetchesMessages: Bool
     let registrationId: UInt32
+    let pniRegistrationId: UInt32
     let capabilities: [String: Bool]
 }
 
@@ -56,6 +57,8 @@ private struct LinkDeviceBody: Encodable {
     let accountAttributes: AccountAttributesJSON
     let aciSignedPreKey: SignedPreKeyJSON
     let aciPqLastResortPreKey: SignedPreKeyJSON
+    let pniSignedPreKey: SignedPreKeyJSON
+    let pniPqLastResortPreKey: SignedPreKeyJSON
 }
 
 private struct LinkDeviceResponse: Decodable {
@@ -65,75 +68,116 @@ private struct LinkDeviceResponse: Decodable {
 
 /// Linked-device registration: turns a provisioning code into server
 /// credentials via PUT `v1/devices/link` (mirroring Desktop's
-/// `linkDevice`, no-E164 path). Generates the identity-adjacent key
-/// material (signed EC prekey id 1, kyber last-resort id 1) and stores it;
-/// key rotation/top-up arrives later. Empty device name (omitted field).
+/// `linkDevice`, no-E164 path). First stores the account identity the
+/// primary device provisioned (ACI + PNI key pairs, profile key and
+/// registration ids, in one transaction), THEN generates the prekeys:
+/// ACI prekeys are signed by the ACI identity and PNI prekeys by the PNI
+/// identity. Signed EC prekey and kyber last-resort prekey get the fixed
+/// ids below; key rotation/top-up arrives later. Empty device name
+/// (omitted field).
 public struct LinkedDeviceRegistration: Sendable {
+    /// Prekey ids. The protocol store has no per-service-id partition, so
+    /// the PNI keys take their own ids rather than shadowing the ACI ones.
+    static let aciPreKeyId: UInt32 = 1
+    static let pniPreKeyId: UInt32 = 2
+
     private let transport: any RegistrationTransport
     private let store: any SignalProtocolStore
+    private let identityStore: any AccountIdentityStoring
     private let accounts: AccountTable
 
     public init(
         transport: any RegistrationTransport,
         store: any SignalProtocolStore,
+        identityStore: any AccountIdentityStoring,
         accounts: AccountTable
     ) {
         self.transport = transport
         self.store = store
+        self.identityStore = identityStore
         self.accounts = accounts
     }
 
     public func register(
-        provisioningCode: String,
-        aci: String,
+        account: ProvisionedAccount,
         environment: Net.Environment
     ) async throws -> DeviceCredentials {
         let context = NullContext()
-        let identity = try store.identityKeyPair(context: context)
-        let registrationId = try store.localRegistrationId(context: context)
+        let registrationId = generateRegistrationId()
+        let pniRegistrationId = generateRegistrationId()
+        // Identity first: nothing below may run against a store that does
+        // not yet hold the account identity.
+        try identityStore.storeAccountIdentity(
+            aci: account.aciIdentity,
+            pni: account.pniIdentity,
+            registrationId: registrationId,
+            pniRegistrationId: pniRegistrationId,
+            profileKey: account.profileKey
+        )
         let password = Data(SecureRandom.bytes(32)).base64EncodedString()
 
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        let signedKey = PrivateKey.generate()
-        let signedSig = identity.privateKey.generateSignature(
-            message: signedKey.publicKey.serialize()
-        )
-        try store.storeSignedPreKey(
-            SignedPreKeyRecord(id: 1, timestamp: nowMs, privateKey: signedKey, signature: signedSig),
-            id: 1,
-            context: context
-        )
-        let kyber = KEMKeyPair.generate()
-        let kyberSig = identity.privateKey.generateSignature(
-            message: kyber.publicKey.serialize()
-        )
-        try store.storeKyberPreKey(
-            KyberPreKeyRecord(id: 1, timestamp: nowMs, keyPair: kyber, signature: kyberSig),
-            id: 1,
-            context: context
-        )
+        func makePreKeys(
+            id: UInt32,
+            identity: IdentityKeyPair
+        ) throws -> (signed: SignedPreKeyJSON, lastResort: SignedPreKeyJSON) {
+            let signedKey = PrivateKey.generate()
+            let signedSig = identity.privateKey.generateSignature(
+                message: signedKey.publicKey.serialize()
+            )
+            try store.storeSignedPreKey(
+                SignedPreKeyRecord(
+                    id: id,
+                    timestamp: nowMs,
+                    privateKey: signedKey,
+                    signature: signedSig
+                ),
+                id: id,
+                context: context
+            )
+            let kyber = KEMKeyPair.generate()
+            let kyberSig = identity.privateKey.generateSignature(
+                message: kyber.publicKey.serialize()
+            )
+            try store.storeKyberPreKey(
+                KyberPreKeyRecord(id: id, timestamp: nowMs, keyPair: kyber, signature: kyberSig),
+                id: id,
+                context: context
+            )
+            return (
+                SignedPreKeyJSON(
+                    keyId: id,
+                    publicKey: signedKey.publicKey.serialize().base64EncodedString(),
+                    signature: signedSig.base64EncodedString()
+                ),
+                SignedPreKeyJSON(
+                    keyId: id,
+                    publicKey: kyber.publicKey.serialize().base64EncodedString(),
+                    signature: kyberSig.base64EncodedString()
+                )
+            )
+        }
+        let aciKeys = try makePreKeys(id: Self.aciPreKeyId, identity: account.aciIdentity)
+        let pniKeys = try makePreKeys(id: Self.pniPreKeyId, identity: account.pniIdentity)
+        let aci = account.aci
+        let provisioningCode = account.provisioningCode
 
         let body = LinkDeviceBody(
             verificationCode: provisioningCode,
             accountAttributes: AccountAttributesJSON(
                 fetchesMessages: true,
                 registrationId: registrationId,
+                pniRegistrationId: pniRegistrationId,
                 capabilities: [
                     "attachmentBackfill": true,
                     "spqr": true,
                     "usernameChangeSyncMessage": true,
                 ]
             ),
-            aciSignedPreKey: SignedPreKeyJSON(
-                keyId: 1,
-                publicKey: signedKey.publicKey.serialize().base64EncodedString(),
-                signature: signedSig.base64EncodedString()
-            ),
-            aciPqLastResortPreKey: SignedPreKeyJSON(
-                keyId: 1,
-                publicKey: kyber.publicKey.serialize().base64EncodedString(),
-                signature: kyberSig.base64EncodedString()
-            )
+            aciSignedPreKey: aciKeys.signed,
+            aciPqLastResortPreKey: aciKeys.lastResort,
+            pniSignedPreKey: pniKeys.signed,
+            pniPqLastResortPreKey: pniKeys.lastResort
         )
         let bodyData = try JSONEncoder().encode(body)
         let basic = Data("\(aci):\(password)".utf8).base64EncodedString()

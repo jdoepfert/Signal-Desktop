@@ -3,6 +3,7 @@
 
 import Foundation
 import LibSignalClient
+import SignalCore
 import SignalStorage
 
 private func tempStorePath() -> String {
@@ -15,24 +16,78 @@ private func removeStore(at path: String) {
 }
 
 func runStoreTests() async {
-    // Local identity persists across reopen.
+    // Fresh store: no identity is ever generated; callers must re-link.
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let store = GRDBIdentityStore(queue: db.queue)
+        var identityThrew = false
+        var registrationThrew = false
+        do {
+            _ = try store.identityKeyPair(context: NullContext())
+        } catch DatabaseOpenError.needsReLink {
+            identityThrew = true
+        }
+        do {
+            _ = try store.localRegistrationId(context: NullContext())
+        } catch DatabaseOpenError.needsReLink {
+            registrationThrew = true
+        }
+        check(
+            "StorageTests.testNoIdentityThrowsNeedsReLink",
+            identityThrew && registrationThrew
+        )
+    } catch {
+        check("StorageTests.testNoIdentityThrowsNeedsReLink", false, "\(error)")
+    }
+
+    // The stored identity is exactly the provisioned account identity and
+    // survives reopen, alongside the registration id and profile key.
     do {
         let path = tempStorePath()
-        let first: Data
+        let aci = IdentityKeyPair.generate()
+        let pni = IdentityKeyPair.generate()
+        let profileKey = Data(repeating: 7, count: 32)
+        var ok = true
         do {
             let db = try SignalDatabase.open(path: path, key: "k")
             let store = GRDBIdentityStore(queue: db.queue)
-            first = try store.identityKeyPair(context: NullContext()).serialize()
+            try store.storeAccountIdentity(
+                aci: aci,
+                pni: pni,
+                registrationId: 1234,
+                pniRegistrationId: 4321,
+                profileKey: profileKey
+            )
         }
         do {
             let db = try SignalDatabase.open(path: path, key: "k")
             let store = GRDBIdentityStore(queue: db.queue)
-            let second = try store.identityKeyPair(context: NullContext()).serialize()
-            check("StorageTests.testIdentityPersists", first == second)
+            let context = NullContext()
+            ok = try store.identityKeyPair(context: context).serialize() == aci.serialize()
+                && store.pniIdentityKeyPair().serialize() == pni.serialize()
+                && store.localRegistrationId(context: context) == 1234
+                && store.pniRegistrationId() == 4321
+                && store.profileKey() == profileKey
         }
+        // The two-argument form (identity only) round-trips too.
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let bare = GRDBIdentityStore(queue: db.queue)
+        try bare.storeAccountIdentity(aci: aci, pni: pni)
+        ok = try ok && bare.identityKeyPair(context: NullContext()).serialize() == aci.serialize()
+        check("StorageTests.testStoredIdentityIsAccountIdentity", ok)
         removeStore(at: path)
     } catch {
-        check("StorageTests.testIdentityPersists", false, "\(error)")
+        check("StorageTests.testStoredIdentityIsAccountIdentity", false, "\(error)")
+    }
+
+    // Registration ids stay within Desktop's range (Crypto.node.ts:44).
+    do {
+        var allInRange = true
+        for _ in 0..<1000 {
+            let id = generateRegistrationId()
+            allInRange = allInRange && (1..<16383).contains(id)
+        }
+        check("StorageTests.testRegistrationIdRange", allInRange)
     }
 
     // Session save/load round-trips a real record.
