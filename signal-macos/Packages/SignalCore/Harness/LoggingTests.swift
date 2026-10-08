@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
-import SignalApp
+import SignalLogging
 
 func runLoggingTests() {
     let store = LogStore()

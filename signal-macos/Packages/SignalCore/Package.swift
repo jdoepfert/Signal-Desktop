@@ -13,7 +13,6 @@ import PackageDescription
 // Keep this file in sync with signal-macos/Package.swift.
 let thirdParty = "../../../.superpowers/sdd/2026-10-07-native-swift-spike/third-party"
 let libsignalSwiftPath = thirdParty + "/libsignal/swift"
-let ffiLibDir = thirdParty + "/libsignal/target/debug"
 
 let package = Package(
     name: "SignalCore",
@@ -26,13 +25,16 @@ let package = Package(
         .package(path: "../SignalStorage"),
     ],
     targets: [
+        // NOTE: no linkerSettings here. Static-library targets are
+        // archived, not linked; `-L` search dirs belong on the final
+        // executable in the workspace root manifest (relative `-L`
+        // differs per manifest, so it cannot live here).
         .target(
             name: "SignalCore",
             dependencies: [
                 .product(name: "LibSignalClient", package: "swift"),
                 "SignalStorage",
-            ],
-            linkerSettings: [.unsafeFlags(["-L\(ffiLibDir)"])]
+            ]
         ),
     ]
 )

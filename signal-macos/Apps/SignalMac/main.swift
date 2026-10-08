@@ -3,13 +3,27 @@
 
 import Foundation
 import SignalApp
+import SwiftUI
 
-// Minimal app entry: resolves the environment and runs the bootstrap
-// sequence. Window hosting and real store/net wiring arrive with later
-// phases (full Xcode project in Phase 2).
-let environment = try AppEnvironment.resolve(
-    arguments: Array(CommandLine.arguments.dropFirst()),
-    environment: ProcessInfo.processInfo.environment
-)
-try await Bootstrap.run(environment: environment)
-print("bootstrap complete: \(environment)")
+// GUI entry: resolves the environment (CLI `--production` or SIGNAL_ENV,
+// default staging) and hosts the content view. Real store/net wiring
+// happens in AppState after linking.
+@main
+struct SignalMacApp: App {
+    @StateObject private var state: AppState = {
+        let environment = (try? AppEnvironment.resolve(
+            arguments: Array(CommandLine.arguments.dropFirst()),
+            environment: ProcessInfo.processInfo.environment
+        )) ?? .staging
+        return AppState(environment: environment)
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView(state: state)
+        }
+        .commands {
+            SidebarCommands()
+        }
+    }
+}

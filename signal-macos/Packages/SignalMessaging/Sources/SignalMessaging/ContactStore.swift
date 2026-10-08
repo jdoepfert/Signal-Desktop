@@ -92,4 +92,19 @@ public final class ContactStore: Sendable {
         }
         return aci
     }
+
+    /// Synchronous table-only lookup for view rendering (no fetch).
+    /// Falls back to the raw ACI; use `displayName(for:)` to resolve.
+    public func cachedName(for aci: String) -> String {
+        guard let row = try? contacts.fetch(aci: aci) else {
+            return aci
+        }
+        if let name = row.name, !name.isEmpty {
+            return name
+        }
+        if let profileName = row.profileName, !profileName.isEmpty {
+            return profileName
+        }
+        return row.phone ?? aci
+    }
 }

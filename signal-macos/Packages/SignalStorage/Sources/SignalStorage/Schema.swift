@@ -8,7 +8,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 3
+    public static let currentVersion = 4
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -64,8 +64,7 @@ public enum MigrationChain {
                 t.uniqueKey(["sender_aci", "timestamp"])
             }
         }
-        migrator.registerMigration("v3-phase2") { db in
-            try db.create(table: "conversations") { t in
+        migrator.registerMigration("v3-phase2") { db in            try db.create(table: "conversations") { t in
                 t.column("id", .text).primaryKey()
                 t.column("kind", .text).notNull()
                 t.column("name", .text)
@@ -98,6 +97,11 @@ public enum MigrationChain {
             try db.create(virtualTable: "messages_fts", using: FTS5()) { t in
                 t.synchronize(withTable: "messages")
                 t.column("body")
+            }
+        }
+        migrator.registerMigration("v4-account-environment") { db in
+            try db.alter(table: "accounts") { t in
+                t.add(column: "environment", .text).notNull().defaults(to: "staging")
             }
         }
         return migrator

@@ -151,7 +151,21 @@ public struct Provisioning: Sendable {
             throw ProvisioningError.envelopeInvalid
         }
     }
+}
 
+/// Decrypted provisioning payload: identity plus the verification code
+/// the server expects back during linked-device registration.
+public struct ProvisionEnvelopeData: Sendable, Equatable {
+    public let aci: String
+    public let provisioningCode: String
+
+    public init(aci: String, provisioningCode: String) {
+        self.aci = aci
+        self.provisioningCode = provisioningCode
+    }
+}
+
+extension Provisioning {
     /// Decrypts `envelopeData` and returns credentials for `deviceId`.
     /// Async for forward compatibility with the transport-driven flow;
     /// the offline decrypt itself does not suspend.
@@ -164,6 +178,43 @@ public struct Provisioning: Sendable {
         )
     }
 
+    /// Decrypts the envelope and returns identity + verification code.
+    /// The code is required: registration is impossible without it.
+    public static func decryptEnvelopeData(
+        _ envelopeData: Data,
+        ourPrivateKeyBytes: Data
+    ) throws -> ProvisionEnvelopeData {
+        let message = try decryptMessageFields(
+            envelopeData,
+            ourPrivateKeyBytes: ourPrivateKeyBytes
+        )
+        let aci = try extractAci(message)
+        guard case .bytes(let codeData) = message[4],
+              let code = String(data: codeData, encoding: .utf8),
+              !code.isEmpty
+        else {
+            throw ProvisioningError.envelopeInvalid
+        }
+        return ProvisionEnvelopeData(aci: aci, provisioningCode: code)
+    }
+
+    private static func extractAci(_ message: [Int: ProtoValue]) throws -> String {
+        // Desktop precedence (ProvisioningCipher.node.ts): binary first.
+        if case .bytes(let binary) = message[17],
+           let aci = ProtoFields.uuidString(binary)
+        {
+            return aci
+        }
+        if case .bytes(let aciData) = message[8],
+           !aciData.isEmpty,
+           let aci = String(data: aciData, encoding: .utf8),
+           UUID(uuidString: aci) != nil
+        {
+            return aci
+        }
+        throw ProvisioningError.envelopeInvalid
+    }
+
     /// Decrypts the envelope and returns the account ACI. Public so the
     /// transport layer and manual tooling can use it without minting
     /// credentials (the device id is server-assigned during verification).
@@ -171,6 +222,17 @@ public struct Provisioning: Sendable {
         _ envelopeData: Data,
         ourPrivateKeyBytes: Data
     ) throws -> String {
+        let message = try decryptMessageFields(
+            envelopeData,
+            ourPrivateKeyBytes: ourPrivateKeyBytes
+        )
+        return try extractAci(message)
+    }
+
+    static func decryptMessageFields(
+        _ envelopeData: Data,
+        ourPrivateKeyBytes: Data
+    ) throws -> [Int: ProtoValue] {
         let envelope: [Int: ProtoValue]
         do {
             envelope = try ProtoFields.parse(envelopeData)
@@ -236,26 +298,11 @@ public struct Provisioning: Sendable {
             throw ProvisioningError.envelopeInvalid
         }
 
-        let message: [Int: ProtoValue]
         do {
-            message = try ProtoFields.parse(plaintext)
+            return try ProtoFields.parse(plaintext)
         } catch {
             throw ProvisioningError.envelopeInvalid
         }
-        // Desktop precedence (ProvisioningCipher.node.ts): binary first.
-        if case .bytes(let binary) = message[17],
-           let aci = ProtoFields.uuidString(binary)
-        {
-            return aci
-        }
-        if case .bytes(let aciData) = message[8],
-           !aciData.isEmpty,
-           let aci = String(data: aciData, encoding: .utf8),
-           UUID(uuidString: aci) != nil
-        {
-            return aci
-        }
-        throw ProvisioningError.envelopeInvalid
     }
 
     private static func constantTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {

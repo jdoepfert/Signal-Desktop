@@ -153,7 +153,8 @@ public final class GroupManager: @unchecked Sendable {
         let cert = try await certs.currentCertificate()
         for memberAci in state.members where memberAci != ourAddress.name {
             let devices = try await sessions.ensureAllSessions(with: memberAci)
-            for deviceId in devices {
+            for device in devices {
+                let deviceId = device.deviceId
                 let key = distributionKey(
                     group: state.masterKey,
                     aci: memberAci,

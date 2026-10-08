@@ -12,12 +12,12 @@ final class FakeChatTransport: SealedMessageTransport, @unchecked Sendable {
     nonisolated(unsafe) var failFirstSendWithCertRejected = false
     nonisolated(unsafe) var rejectEverySend = false
 
-    func send(_ envelope: Data, to recipientAci: String) async throws {
+    func send(_ envelope: OutboundEnvelope, to recipientAci: String) async throws {
         sendCalls += 1
         if rejectEverySend || (failFirstSendWithCertRejected && sendCalls == 1) {
             throw MessagePipeError.certRejected
         }
-        sentEnvelopes.append(envelope)
+        sentEnvelopes.append(envelope.bytes)
     }
 
     func incomingEnvelopes() -> AsyncStream<Data> {

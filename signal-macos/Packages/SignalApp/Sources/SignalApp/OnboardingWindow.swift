@@ -1,11 +1,13 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import AppKit
+import CoreImage
 import SwiftUI
 
-/// Minimal onboarding UI: shows the provisioning address (rendered as QR by
-/// the host), link status, and the clock-skew warning. Type-checked here;
-/// hosted by a real window with the Xcode project (Phase 2).
+/// Onboarding link flow: waiting → address shown (as QR) → linked.
+/// Type-checked here; QR rendering needs a display server (verified in
+/// dogfood, not in headless CI).
 public struct OnboardingWindow: View {
     public let address: String?
     public let linkedAci: String?
@@ -24,18 +26,42 @@ public struct OnboardingWindow: View {
             } else if let address {
                 Text("Scan to link")
                     .font(.headline)
-                Text(address)
-                    .font(.caption)
-                    .textSelection(.enabled)
+                if let qr = Self.qrImage(string: address) {
+                    Image(nsImage: qr)
+                } else {
+                    Text(address)
+                        .font(.caption)
+                        .textSelection(.enabled)
+                }
             } else {
                 Text("Starting…")
             }
             if clockSkewed {
                 Text("Warning: your clock disagrees with the server by over 5 minutes. Calls and sending may fail until it is fixed.")
-                    .foregroundStyle(.red)
+                    .foregroundColor(.red)
             }
         }
         .padding()
-        .frame(minWidth: 320, minHeight: 200)
+        .frame(minWidth: 320, minHeight: 240)
+    }
+
+    static func qrImage(string: String) -> NSImage? {
+        guard let data = string.data(using: .utf8),
+              let filter = CIFilter(name: "CIQRCodeGenerator")
+        else {
+            return nil
+        }
+        filter.setValue(data, forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else {
+            return nil
+        }
+        // Integer-scale first: fractional display scaling would blur
+        // modules into an unscannable image.
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        let rep = NSCIImageRep(ciImage: scaled)
+        let image = NSImage(size: NSSize(width: 290, height: 290))
+        image.addRepresentation(rep)
+        return image
     }
 }

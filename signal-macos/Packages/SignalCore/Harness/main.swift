@@ -39,6 +39,7 @@ run("LibsignalRoundTripTests") {
 
 await runAsync("ProvisioningTests") {
     await runProvisioningTests()
+    runProvisioningCodeTests()
 }
 
 run("RingRTCTests") {
@@ -83,6 +84,10 @@ await runAsync("MessagingTests") {
     await runContactTests()
     await runGroupTests()
     await runAttachmentTests()
+    await runLiveTransportTests()
+    await runConversationViewModelTests()
+    runKeychainTests()
+    await runLinkedRegistrationTests()
 }
 
 exit(checkResult())

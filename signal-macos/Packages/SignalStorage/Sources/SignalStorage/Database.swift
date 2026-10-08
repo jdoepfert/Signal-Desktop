@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import GRDB
-import SignalApp
+import SignalLogging
 
 /// SQLCipher-backed database handle. `open` migrates to
 /// `MigrationChain.currentVersion`, so a failed open leaves the caller's

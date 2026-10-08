@@ -13,6 +13,30 @@ public protocol PreKeyService: Sendable {
     func fetchBundles(for aci: String) async throws -> (IdentityKey, [PreKeyBundle])
 }
 
+/// Live `PreKeyService` over an unauthenticated chat connection
+/// (prekey bundles are public to enable sealed sender).
+public struct LivePreKeyService: PreKeyService {
+    private let keys: any UnauthKeysService
+
+    public init(keys: any UnauthKeysService) {
+        self.keys = keys
+    }
+
+    public func fetchBundles(for aci: String) async throws -> (IdentityKey, [PreKeyBundle]) {
+        let target: ServiceId
+        do {
+            target = try Aci.parseFrom(serviceIdString: aci)
+        } catch {
+            target = try Pni.parseFrom(serviceIdString: aci)
+        }
+        return try await keys.getPreKeys(
+            for: target,
+            device: .allDevices,
+            auth: .unrestrictedUnauthenticatedAccess
+        )
+    }
+}
+
 /// Ensures a usable session exists before encrypting: checks the store,
 /// and on a miss fetches the recipient's bundles and processes the first
 /// one for the requested device.
@@ -51,11 +75,14 @@ public struct SessionSetup: Sendable {
     }
 
     /// Ensures sessions with all of the account's devices, returning their
-    /// device ids. Used for per-device fanout (e.g. sender-key distribution).
-    public func ensureAllSessions(with aci: String) async throws -> [UInt32] {
+    /// device and registration ids. Used for per-device fanout (e.g.
+    /// sender-key distribution, multi-device sends).
+    public func ensureAllSessions(with aci: String) async throws -> [
+        (deviceId: UInt32, registrationId: UInt32)
+    ] {
         let (_, bundles) = try await keys.fetchBundles(for: aci)
         var seen = Set<UInt32>()
-        var devices = [UInt32]()
+        var devices = [(deviceId: UInt32, registrationId: UInt32)]()
         for bundle in bundles where seen.insert(bundle.deviceId).inserted {
             let address = try ProtocolAddress(name: aci, deviceId: bundle.deviceId)
             if try store.loadSession(for: address, context: NullContext())?.hasCurrentState != true {
@@ -68,7 +95,7 @@ public struct SessionSetup: Sendable {
                     context: NullContext()
                 )
             }
-            devices.append(bundle.deviceId)
+            devices.append((bundle.deviceId, bundle.registrationId))
         }
         return devices
     }

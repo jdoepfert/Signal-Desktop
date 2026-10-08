@@ -4,7 +4,7 @@
 import Foundation
 import GRDB
 import LibSignalClient
-import SignalApp
+import SignalLogging
 
 /// Persistent `IdentityKeyStore`: own identity + registration id live in
 /// `kv`, peer identities in `identities`. Trust semantics mirror

@@ -22,7 +22,7 @@ let package = Package(
             revision: "fa02b419f8b112b57709fc9b9fdeb4a565d68865"
         ),
         .package(path: libsignalSwiftPath),
-        .package(path: "../SignalApp"),
+        .package(path: "../SignalLogging"),
     ],
     targets: [
         .target(
@@ -30,7 +30,7 @@ let package = Package(
             dependencies: [
                 .product(name: "GRDB", package: "grdb-sqlcipher"),
                 .product(name: "LibSignalClient", package: "swift"),
-                .product(name: "SignalApp", package: "SignalApp"),
+                .product(name: "SignalLogging", package: "SignalLogging"),
             ]
         ),
     ]

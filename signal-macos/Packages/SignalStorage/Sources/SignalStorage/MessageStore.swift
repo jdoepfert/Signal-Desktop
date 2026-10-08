@@ -68,6 +68,28 @@ public final class MessageStore: Sendable {
             )
         }
     }
+
+    /// Newest-first page for thread pagination. When `beforeRowId` is
+    /// given, returns rows older than it (keyset pagination, no offsets).
+    public func page(limit: Int, beforeRowId: Int64? = nil) throws -> [StoredMessage] {
+        try queue.read { db in
+            if let beforeRowId {
+                return try StoredMessage.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, sender_aci, body, timestamp FROM messages
+                        WHERE id < ? ORDER BY id DESC LIMIT ?
+                        """,
+                    arguments: [beforeRowId, limit]
+                )
+            }
+            return try StoredMessage.fetchAll(
+                db,
+                sql: "SELECT id, sender_aci, body, timestamp FROM messages ORDER BY id DESC LIMIT ?",
+                arguments: [limit]
+            )
+        }
+    }
 }
 
 extension StoredMessage: FetchableRecord {

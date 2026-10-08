@@ -52,3 +52,4 @@ ts/protobuf/*.d.ts
 
 # Native Swift spike (docs/superpowers/specs/2026-10-07-native-swift-macos-design.md)
 signal-macos/.build/
+signal-macos/dist/

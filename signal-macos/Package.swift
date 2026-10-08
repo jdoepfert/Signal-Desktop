@@ -30,6 +30,7 @@ let package = Package(
             revision: "fa02b419f8b112b57709fc9b9fdeb4a565d68865"
         ),
         .package(path: "Packages/SignalMessaging"),
+        .package(path: "Packages/SignalLogging"),
     ],
     targets: [
         .executableTarget(
@@ -42,6 +43,7 @@ let package = Package(
                 "SignalStorage",
                 .product(name: "GRDB", package: "grdb-sqlcipher"),
                 "SignalMessaging",
+                "SignalLogging",
             ],
             path: "Packages/SignalCore/Harness",
             linkerSettings: [
@@ -56,7 +58,15 @@ let package = Package(
         .executableTarget(
             name: "SignalMac",
             dependencies: ["SignalApp"],
-            path: "Apps/SignalMac"
+            path: "Apps/SignalMac",
+            linkerSettings: [
+                .linkedLibrary("c++"),
+                .unsafeFlags([
+                    "-L\(ffiLibDir)",
+                    "-L\(ringrtcLibDir)",
+                    "-L\(webrtcLibDir)",
+                ]),
+            ]
         ),
     ]
 )

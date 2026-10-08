@@ -44,7 +44,8 @@ private func randomBytes(_ count: Int) -> Data {
 private func buildEnvelope(
     aci: String,
     ourPublicKey: PublicKey,
-    aciBinary: Data? = nil
+    aciBinary: Data? = nil,
+    provisioningCode: String? = nil
 ) throws -> (envelope: Data, ephemeralSecret: Data) {
     let ephemeral = PrivateKey.generate()
     let agreement = ephemeral.keyAgreement(with: ourPublicKey)
@@ -61,6 +62,9 @@ private func buildEnvelope(
     message.append(protoBytesField(8, Data(aci.utf8)))
     if let aciBinary {
         message.append(protoBytesField(17, aciBinary))
+    }
+    if let provisioningCode {
+        message.append(protoBytesField(4, Data(provisioningCode.utf8)))
     }
 
     let iv = randomBytes(16)
@@ -259,5 +263,51 @@ private extension Data {
             index = next
         }
         self.init(bytes)
+    }
+}
+
+func runProvisioningCodeTests() {
+    do {
+        let ours = PrivateKey.generate()
+        let (envelope, _) = try buildEnvelope(
+            aci: "9d0652a3-dcc3-4d11-975f-74d61598733f",
+            ourPublicKey: ours.publicKey,
+            provisioningCode: "123-456"
+        )
+        let decoded = try Provisioning.decryptEnvelopeData(
+            envelope,
+            ourPrivateKeyBytes: ours.serialize()
+        )
+        check(
+            "ProvisioningTests.testProvisioningCode",
+            decoded.aci == "9d0652a3-dcc3-4d11-975f-74d61598733f"
+                && decoded.provisioningCode == "123-456"
+        )
+    } catch {
+        check("ProvisioningTests.testProvisioningCode", false, "\(error)")
+    }
+
+    // Missing code throws (registration is impossible without it).
+    do {
+        let ours = PrivateKey.generate()
+        let (envelope, _) = try buildEnvelope(
+            aci: "9d0652a3-dcc3-4d11-975f-74d61598733f",
+            ourPublicKey: ours.publicKey
+        )
+        do {
+            _ = try Provisioning.decryptEnvelopeData(
+                envelope,
+                ourPrivateKeyBytes: ours.serialize()
+            )
+            check("ProvisioningTests.testMissingCode", false, "no error thrown")
+        } catch let error as ProvisioningError {
+            check(
+                "ProvisioningTests.testMissingCode",
+                error == .envelopeInvalid,
+                "got \(error)"
+            )
+        }
+    } catch {
+        check("ProvisioningTests.testMissingCode", false, "\(error)")
     }
 }

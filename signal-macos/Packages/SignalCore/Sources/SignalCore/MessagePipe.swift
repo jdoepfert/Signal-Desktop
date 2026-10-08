@@ -33,9 +33,26 @@ public enum MessagePipeError: Error, Equatable {
 /// Transport seam: the real implementation wraps an authenticated chat
 /// connection (Phase 1); tests use an in-memory fake. The real transport
 /// maps server sender-cert rejection to `MessagePipeError.certRejected`.
+/// One call carries one per-device envelope; fanout across devices is the
+/// pipe's job (see `MessagePipe.sendText`).
 public protocol SealedMessageTransport: Sendable {
-    func send(_ envelope: Data, to recipientAci: String) async throws
+    func send(_ envelope: OutboundEnvelope, to recipientAci: String) async throws
     func incomingEnvelopes() -> AsyncStream<Data>
+}
+
+/// One per-device sealed envelope plus its routing metadata.
+public struct OutboundEnvelope: Sendable, Equatable {
+    public let bytes: Data
+    public let deviceId: UInt32
+    public let registrationId: UInt32
+    public let timestamp: UInt64
+
+    public init(bytes: Data, deviceId: UInt32, registrationId: UInt32, timestamp: UInt64) {
+        self.bytes = bytes
+        self.deviceId = deviceId
+        self.registrationId = registrationId
+        self.timestamp = timestamp
+    }
 }
 
 /// Sender-certificate source. The real implementation fetches and caches
@@ -64,6 +81,8 @@ public actor MessagePipe {
     private let trustRoot: PublicKey
     private let source: AsyncStream<Data>?
     private let messages: MessageStore?
+    private let devicesForRecipient:
+        (@Sendable (String) async throws -> [(deviceId: UInt32, registrationId: UInt32)])?
     private let stream: AsyncStream<DecryptedMessage>
     private let continuation: AsyncStream<DecryptedMessage>.Continuation
     private var pumpTask: Task<Void, Never>?
@@ -73,6 +92,9 @@ public actor MessagePipe {
     /// - Parameter messages: when present, inbound messages persist here and
     ///   duplicates (same sender + timestamp) are stored — and yielded —
     ///   once.
+    /// - Parameter devicesForRecipient: device fanout provider; defaults to
+    ///   the single requested device (legacy/test behavior). Live wiring
+    ///   passes session-backed enumeration.
     public init(
         transport: any SealedMessageTransport,
         certs: any SenderCertProvider,
@@ -80,7 +102,8 @@ public actor MessagePipe {
         ourAddress: ProtocolAddress,
         trustRoot: PublicKey,
         incomingSource: AsyncStream<Data>? = nil,
-        messages: MessageStore? = nil
+        messages: MessageStore? = nil,
+        devicesForRecipient: (@Sendable (String) async throws -> [(deviceId: UInt32, registrationId: UInt32)])? = nil
     ) {
         self.transport = transport
         self.certs = certs
@@ -89,6 +112,7 @@ public actor MessagePipe {
         self.trustRoot = trustRoot
         self.source = incomingSource
         self.messages = messages
+        self.devicesForRecipient = devicesForRecipient
         var continuation: AsyncStream<DecryptedMessage>.Continuation!
         self.stream = AsyncStream { continuation = $0 }
         self.continuation = continuation
@@ -108,32 +132,50 @@ public actor MessagePipe {
 
     /// Sends `text` to `recipientAci`. `deviceId` is server-provided in
     /// production (device list fetch, Phase 1); the spike defaults to the
-    /// primary device.
+    /// primary device. With `devicesForRecipient` set, one envelope goes
+    /// out per device under a single timestamp; without it, a single
+    /// envelope goes to `deviceId` (test behavior).
     public func sendText(
         _ text: String,
         to recipientAci: String,
         deviceId: UInt32 = 1
     ) async throws {
-        let recipient = try ProtocolAddress(name: recipientAci, deviceId: deviceId)
         let timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
+        let devices: [(deviceId: UInt32, registrationId: UInt32)]
+        if let devicesForRecipient {
+            devices = try await devicesForRecipient(recipientAci)
+        } else {
+            devices = [(deviceId, 0)]
+        }
         var cert = try await certs.currentCertificate()
-        var envelope = try buildEnvelope(
-            text: text,
-            timestamp: timestamp,
-            cert: cert,
-            recipient: recipient
-        )
+        func buildAll() throws -> [OutboundEnvelope] {
+            try devices.map { (dev, reg) in
+                let recipient = try ProtocolAddress(name: recipientAci, deviceId: dev)
+                let bytes = try buildEnvelope(
+                    text: text,
+                    timestamp: timestamp,
+                    cert: cert,
+                    recipient: recipient
+                )
+                return OutboundEnvelope(
+                    bytes: bytes,
+                    deviceId: dev,
+                    registrationId: reg,
+                    timestamp: timestamp
+                )
+            }
+        }
+        var envelopes = try buildAll()
         do {
-            try await transport.send(envelope, to: recipientAci)
+            for envelope in envelopes {
+                try await transport.send(envelope, to: recipientAci)
+            }
         } catch MessagePipeError.certRejected {
             cert = try await certs.refreshCertificate()
-            envelope = try buildEnvelope(
-                text: text,
-                timestamp: timestamp,
-                cert: cert,
-                recipient: recipient
-            )
-            try await transport.send(envelope, to: recipientAci)
+            envelopes = try buildAll()
+            for envelope in envelopes {
+                try await transport.send(envelope, to: recipientAci)
+            }
         }
     }
 

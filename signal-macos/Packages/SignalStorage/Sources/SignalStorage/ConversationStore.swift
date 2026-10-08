@@ -75,6 +75,15 @@ public final class ConversationStore: Sendable {
         }
     }
 
+    public func setMuted(_ id: String, muted: Bool) throws {
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE conversations SET muted = ? WHERE id = ?",
+                arguments: [muted, id]
+            )
+        }
+    }
+
     public func incrementUnread(_ id: String) throws {
         try queue.write { db in
             try db.execute(
