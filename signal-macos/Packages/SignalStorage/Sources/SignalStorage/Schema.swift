@@ -25,7 +25,6 @@ public enum MigrationChain {
             try db.create(table: "identities") { t in
                 t.column("address", .text).primaryKey()
                 t.column("public_key", .blob).notNull()
-                t.column("private_key", .blob).notNull()
             }
             try db.create(table: "sessions") { t in
                 t.column("address", .text).primaryKey()
@@ -48,6 +47,12 @@ public enum MigrationChain {
                 t.column("distribution_id", .text).notNull()
                 t.column("record", .blob).notNull()
                 t.primaryKey(["address", "distribution_id"])
+            }
+            try db.create(table: "kyber_base_keys") { t in
+                t.column("kyber_id", .integer).notNull()
+                t.column("signed_id", .integer).notNull()
+                t.column("base_key", .blob).notNull()
+                t.primaryKey(["kyber_id", "signed_id", "base_key"])
             }
         }
         return migrator

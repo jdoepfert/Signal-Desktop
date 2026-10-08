@@ -9,6 +9,9 @@ import PackageDescription
 // pins a mechanical snapshot fork (upstream GRDB v7.11.1 + official
 // Zetetic SQLCipher.swift). Trust decision, ledgered: replace with our own
 // fork in Phase 2.
+let thirdParty = "../../../.superpowers/sdd/2026-10-07-native-swift-spike/third-party"
+let libsignalSwiftPath = thirdParty + "/libsignal/swift"
+
 let package = Package(
     name: "SignalStorage",
     platforms: [.macOS(.v13)],
@@ -18,6 +21,7 @@ let package = Package(
             url: "https://github.com/Kizotis/grdb-sqlcipher.git",
             revision: "fa02b419f8b112b57709fc9b9fdeb4a565d68865"
         ),
+        .package(path: libsignalSwiftPath),
         .package(path: "../SignalApp"),
     ],
     targets: [
@@ -25,6 +29,7 @@ let package = Package(
             name: "SignalStorage",
             dependencies: [
                 .product(name: "GRDB", package: "grdb-sqlcipher"),
+                .product(name: "LibSignalClient", package: "swift"),
                 .product(name: "SignalApp", package: "SignalApp"),
             ]
         ),

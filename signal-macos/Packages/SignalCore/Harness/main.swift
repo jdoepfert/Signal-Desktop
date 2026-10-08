@@ -60,6 +60,7 @@ run("LoggingTests") {
 
 await runAsync("StorageTests") {
     await runStorageTests()
+    await runStoreTests()
 }
 
 await runAsync("RegistrationTests") {
