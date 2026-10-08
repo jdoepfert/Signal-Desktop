@@ -88,6 +88,8 @@ await runAsync("MessagingTests") {
     await runConversationViewModelTests()
     runKeychainTests()
     await runLinkedRegistrationTests()
+    await runSearchTests()
+    await runLinkPreviewTests()
 }
 
 exit(checkResult())
