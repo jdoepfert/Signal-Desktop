@@ -7,11 +7,14 @@ import PackageDescription
 // Workspace root: mirrors Packages/SignalCore by path so that
 // `swift run SpikeHarness` here executes the package's checks.
 // Keep dependencies/linker settings in sync with
-// Packages/SignalCore/Package.swift.
-let libsignalSwiftPath =
-    "../.superpowers/sdd/2026-10-07-native-swift-spike/third-party/libsignal/swift"
-let ffiLibDir =
-    "/Users/joerg/Documents/Github/Signal-Desktop/.superpowers/sdd/2026-10-07-native-swift-spike/third-party/libsignal/target/debug"
+// Packages/SignalCore/Package.swift. Paths are relative to this file and
+// correct when swift runs from this directory (the documented lane);
+// third-party checkouts must live at these spots (see CI-LANE.md).
+let thirdParty = "../.superpowers/sdd/2026-10-07-native-swift-spike/third-party"
+let libsignalSwiftPath = thirdParty + "/libsignal/swift"
+let ffiLibDir = thirdParty + "/libsignal/target/debug"
+let ringrtcLibDir = thirdParty + "/ringrtc/target/debug"
+let webrtcLibDir = thirdParty + "/ringrtc-webrtc/release/obj"
 
 let package = Package(
     name: "signal-macos",
@@ -35,7 +38,14 @@ let package = Package(
                 .product(name: "SignalCallsSpike", package: "SignalCallsSpike"),
             ],
             path: "Packages/SignalCore/Harness",
-            linkerSettings: [.unsafeFlags(["-L\(ffiLibDir)"])]
+            linkerSettings: [
+                .linkedLibrary("c++"),
+                .unsafeFlags([
+                    "-L\(ffiLibDir)",
+                    "-L\(ringrtcLibDir)",
+                    "-L\(webrtcLibDir)",
+                ]),
+            ]
         ),
     ]
 )

@@ -9,6 +9,14 @@
     {
       "plaintextUtf8": "0123456789abcdef0123456789ABCDEF",
       "ciphertextHex": "bf05de264f8c142859ff6d3ed506c6b3d08355ed5e4834713e8741d4f05e129e3a582aefabc97d17770cbfdc9f0db967"
+    },
+    {
+      "plaintextUtf8": "",
+      "ciphertextHex": "3fbe59068ee81748afd81fc1e1d02e42"
+    },
+    {
+      "plaintextUtf8": "0123456789abcdef",
+      "ciphertextHex": "bf05de264f8c142859ff6d3ed506c6b364d7a59bb9e497f8b135c6932fc56379"
     }
   ],
   "generatedBy": "openssl enc -aes-256-cbc (independent reference)"

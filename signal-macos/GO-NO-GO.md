@@ -8,7 +8,7 @@ two live-staging proofs still need a staging phone (see blockers).
 
 Spec: `docs/superpowers/specs/2026-10-07-native-swift-macos-design.md`.
 Plan: `docs/superpowers/plans/2026-10-07-native-swift-spike.md`.
-Verify: `cd signal-macos && swift run SpikeHarness` (9/9 checks pass).
+Verify: `cd signal-macos && swift run SpikeHarness` (14/14 checks pass).
 
 ## Evidence
 
@@ -69,11 +69,17 @@ Verify: `cd signal-macos && swift run SpikeHarness` (9/9 checks pass).
 ### (e) Estimated delta to Phase 1
 
 - Foundation estimate in the spec stands. Adjustments from spike
-  learnings: automate the libsignal FFI build (script + pinned SHA);
+  learnings: automate the libsignal FFI build (script it);
   land the RingRTC macOS cfg upstream; defer the WebRTC-module
   decision to Phase 4; adopt XCTest once Xcode is available (harness
   maps 1:1); storage (GRDB) is all new. No blocking unknowns remain in
   the protocol, crypto, or calling-linkage layers.
+- Phase 1 entry criteria (recorded from review): live staging link +
+  live 1:1 exchange (staging phone); confirm `buildVariant` against
+  live staging; regenerate provisioning fixtures from a reference
+  implementation (current ones are self-consistent by construction);
+  diff the hand-written RingRTC bridging header against cbindgen
+  output; port the harness to XCTest.
 
 ## Blockers for full GO
 

@@ -5,14 +5,15 @@
 import PackageDescription
 
 // Pinned: signalapp/libsignal @ 4beb029d8a941f81e7d9c6d8af1ed25a677569a8,
-// checked out at ../../../../.superpowers/sdd/<plan>/third-party/libsignal
-// and built via swift/build_ffi.sh (debug). Upstream's Swift package is
-// local-dev only (no published artifact), hence the path dependency.
+// checked out at <thirdParty>/libsignal and built via swift/build_ffi.sh
+// (debug). Upstream's Swift package is local-dev only (no published
+// artifact), hence the path dependency. Library search dirs derive from
+// the checkout location, so fresh clones work if third-party checkouts
+// live at these relative paths (see signal-macos/CI-LANE.md).
 // Keep this file in sync with signal-macos/Package.swift.
-let libsignalSwiftPath =
-    "../../../.superpowers/sdd/2026-10-07-native-swift-spike/third-party/libsignal/swift"
-let ffiLibDir =
-    "/Users/joerg/Documents/Github/Signal-Desktop/.superpowers/sdd/2026-10-07-native-swift-spike/third-party/libsignal/target/debug"
+let thirdParty = "../../../.superpowers/sdd/2026-10-07-native-swift-spike/third-party"
+let libsignalSwiftPath = thirdParty + "/libsignal/swift"
+let ffiLibDir = thirdParty + "/libsignal/target/debug"
 
 let package = Package(
     name: "SignalCore",

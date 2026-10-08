@@ -8,8 +8,11 @@ import Foundation
 // libsignal's Swift bindings expose no AES-CBC primitive and CryptoKit has
 // no CBC mode, so this lives here. Correctness is pinned by
 // openssl-generated known-answer vectors in
-// Harness/ProvisioningTests.swift (`testAesCbcKnownAnswer`), plus an
-// S-box/inverse-S-box consistency assertion in the same test.
+// Harness/ProvisioningTests.swift (`testAesCbcKnownAnswer`), covering
+// partial-block, exact-block, full-padding-block, and empty inputs plus a
+// corruption-mismatch case. The S-box is computed from field math
+// (FIPS-197 5.1.1), not transcribed, and the inverse box is derived from
+// it, so the pair is consistent by construction.
 
 public enum AesCbcError: Error, Equatable {
     case invalidKeyLength

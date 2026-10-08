@@ -228,15 +228,16 @@ public struct Provisioning: Sendable {
         } catch {
             throw ProvisioningError.envelopeInvalid
         }
-        if case .bytes(let aciData) = message[8],
-           !aciData.isEmpty,
-           let aci = String(data: aciData, encoding: .utf8),
-           !aci.isEmpty
+        // Desktop precedence (ProvisioningCipher.node.ts): binary first.
+        if case .bytes(let binary) = message[17],
+           let aci = ProtoFields.uuidString(binary)
         {
             return aci
         }
-        if case .bytes(let binary) = message[17],
-           let aci = ProtoFields.uuidString(binary)
+        if case .bytes(let aciData) = message[8],
+           !aciData.isEmpty,
+           let aci = String(data: aciData, encoding: .utf8),
+           UUID(uuidString: aci) != nil
         {
             return aci
         }

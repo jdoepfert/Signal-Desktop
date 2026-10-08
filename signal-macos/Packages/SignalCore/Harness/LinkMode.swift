@@ -34,6 +34,7 @@ func runLinkMode() async -> Int32 {
             }
         }
         print("Session closed before an envelope arrived.")
+        print("Addresses expire within minutes — re-run for a fresh one, then re-scan.")
         return 1
     } catch {
         print("link failed: \(error)")

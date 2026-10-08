@@ -12,6 +12,12 @@ public enum CallsSpikeError: Error, Equatable {
 public enum CallsSpike {
     /// Generates a call-link root key through the RingRTC Rust FFI and
     /// validates it through the FFI. No media devices, no network.
+    ///
+    /// Synchronicity assumption: the FFI invokes `callback` synchronously
+    /// before returning (true for these entry points today — the key is
+    /// validated in the lines below, which would fail otherwise). If a
+    /// future entry point calls back asynchronously, this box must gain a
+    /// semaphore; do not copy the pattern blindly.
     public static func generateCallLinkRootKey() throws -> Data {
         final class DataBox: @unchecked Sendable {
             var data = Data()

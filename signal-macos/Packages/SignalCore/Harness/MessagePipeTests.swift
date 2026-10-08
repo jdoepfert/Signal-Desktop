@@ -10,10 +10,11 @@ final class FakeChatTransport: SealedMessageTransport, @unchecked Sendable {
     nonisolated(unsafe) var sentEnvelopes = [Data]()
     nonisolated(unsafe) var sendCalls = 0
     nonisolated(unsafe) var failFirstSendWithCertRejected = false
+    nonisolated(unsafe) var rejectEverySend = false
 
     func send(_ envelope: Data, to recipientAci: String) async throws {
         sendCalls += 1
-        if failFirstSendWithCertRejected, sendCalls == 1 {
+        if rejectEverySend || (failFirstSendWithCertRejected && sendCalls == 1) {
             throw MessagePipeError.certRejected
         }
         sentEnvelopes.append(envelope)
@@ -58,6 +59,13 @@ private struct PipeFixture {
     let senderCert: SenderCertificate
 
     func mintSenderCert() throws -> SenderCertificate {
+        try mintSenderCert(trustRootKeys: trustRootKeys, serverKeys: serverKeys)
+    }
+
+    func mintSenderCert(
+        trustRootKeys: IdentityKeyPair,
+        serverKeys: IdentityKeyPair
+    ) throws -> SenderCertificate {
         let context = NullContext()
         let serverCert = try ServerCertificate(
             keyId: 1,
@@ -222,13 +230,18 @@ func runMessagePipeTests() async {
     }
 
     // Outbound: first send rejected on cert -> refresh -> retry succeeds.
+    // The first cert is genuinely unusable (foreign trust root); only the
+    // refreshed cert can complete the exchange.
     do {
         let fixture = try PipeFixture.make()
         let context = NullContext()
         let transport = FakeChatTransport()
         transport.failFirstSendWithCertRejected = true
         let certs = FakeCerts(
-            first: fixture.senderCert,
+            first: try fixture.mintSenderCert(
+                trustRootKeys: IdentityKeyPair.generate(),
+                serverKeys: IdentityKeyPair.generate()
+            ),
             second: try fixture.mintSenderCert()
         )
         let pipe = MessagePipe(
@@ -255,6 +268,34 @@ func runMessagePipeTests() async {
         )
     } catch {
         check("MessagePipeTests.testFirstSendRetriesOnMissingCert", false, "\(error)")
+    }
+
+    // Outbound: rejection on both attempts surfaces the error (no
+    // silent drop, no third attempt).
+    do {
+        let fixture = try PipeFixture.make()
+        let transport = FakeChatTransport()
+        transport.rejectEverySend = true
+        let certs = FakeCerts(first: fixture.senderCert, second: fixture.senderCert)
+        let pipe = MessagePipe(
+            transport: transport,
+            certs: certs,
+            store: fixture.aliceStore,
+            ourAddress: fixture.aliceAddress,
+            trustRoot: fixture.trustRoot
+        )
+        do {
+            try await pipe.sendText("hello-spike", to: pipeBob)
+            check("MessagePipeTests.testSendSurfacesRepeatedRejection", false, "no error thrown")
+        } catch let error as MessagePipeError {
+            check(
+                "MessagePipeTests.testSendSurfacesRepeatedRejection",
+                error == .certRejected && transport.sendCalls == 2 && certs.refreshCalls == 1,
+                "got \(error)"
+            )
+        }
+    } catch {
+        check("MessagePipeTests.testSendSurfacesRepeatedRejection", false, "\(error)")
     }
 }
 

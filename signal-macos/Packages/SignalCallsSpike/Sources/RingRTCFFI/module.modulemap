@@ -1,4 +1,6 @@
 module RingRTCFFI [system] {
     header "ringrtc_spike.h"
+    link "ringrtc"
+    link "webrtc"
     export *
 }

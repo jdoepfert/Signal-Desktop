@@ -11,7 +11,15 @@ import SignalCore
 //   ProvisionMessage  { ... optional string aci = 8; ... }
 private func protoBytesField(_ number: Int, _ bytes: Data) -> Data {
     var out = Data()
-    out.append(UInt8(number << 3 | 2))
+    var tag = UInt64(number << 3 | 2)
+    repeat {
+        var byte = UInt8(tag & 0x7F)
+        tag >>= 7
+        if tag != 0 {
+            byte |= 0x80
+        }
+        out.append(byte)
+    } while tag != 0
     var count = bytes.count
     repeat {
         var byte = UInt8(count & 0x7F)
@@ -35,7 +43,8 @@ private func randomBytes(_ count: Int) -> Data {
 // testAesCbcKnownAnswer (openssl-generated vectors).
 private func buildEnvelope(
     aci: String,
-    ourPublicKey: PublicKey
+    ourPublicKey: PublicKey,
+    aciBinary: Data? = nil
 ) throws -> (envelope: Data, ephemeralSecret: Data) {
     let ephemeral = PrivateKey.generate()
     let agreement = ephemeral.keyAgreement(with: ourPublicKey)
@@ -50,6 +59,9 @@ private func buildEnvelope(
 
     var message = Data()
     message.append(protoBytesField(8, Data(aci.utf8)))
+    if let aciBinary {
+        message.append(protoBytesField(17, aciBinary))
+    }
 
     let iv = randomBytes(16)
     let ciphertext = try AesCbc.encrypt(message, key: cipherKey, iv: iv)
@@ -110,6 +122,15 @@ func runProvisioningTests() async {
             let decrypted = try AesCbc.decrypt(ciphertext, key: key, iv: iv)
             ok = ok && decrypted == Data(vector.plaintextUtf8.utf8)
         }
+        // Corrupting the first block must garble deterministically (never
+        // silently match): CBC propagates the damage, padding stays valid.
+        if var garbled = Data(hexString: fixture.vectors[0].ciphertextHex) {
+            garbled[0] ^= 0xFF
+            let decrypted = try AesCbc.decrypt(garbled, key: key, iv: iv)
+            ok = ok && decrypted != Data(fixture.vectors[0].plaintextUtf8.utf8)
+        } else {
+            ok = false
+        }
         check("ProvisioningTests.testAesCbcKnownAnswer", ok)
     } catch {
         check("ProvisioningTests.testAesCbcKnownAnswer", false, "\(error)")
@@ -157,14 +178,65 @@ func runProvisioningTests() async {
     do {
         _ = try StagingTransport(host: "evil.example")
         check("ProvisioningTests.testStagingHostPinned", false, "no error thrown")
+    } catch let error as ProvisioningError {
+        // Asserts the specific rejection: the offline allowlist is the only
+        // pinning this spike enforces. Real TLS pinning is delegated to
+        // libsignal's Rust transport and is unexercised (see GO-NO-GO).
+        check(
+            "ProvisioningTests.testStagingHostPinned",
+            error == .untrustedHost,
+            "got \(error)"
+        )
     } catch {
-        check("ProvisioningTests.testStagingHostPinned", true)
+        check("ProvisioningTests.testStagingHostPinned", false, "\(error)")
     }
     do {
         _ = try StagingTransport(host: "chat.staging.signal.org")
         check("ProvisioningTests.testStagingHostPinnedStaging", true)
     } catch {
         check("ProvisioningTests.testStagingHostPinnedStaging", false, "\(error)")
+    }
+
+    // Binary ACI (field 17) wins over the string form (field 8), matching
+    // Desktop's ProvisioningCipher precedence.
+    do {
+        let ours = PrivateKey.generate()
+        let binaryUuid = Data(hexString: "6838237d02f640988110698253d15961")!
+        let (envelope, _) = try buildEnvelope(
+            aci: "9d0652a3-dcc3-4d11-975f-74d61598733f",
+            ourPublicKey: ours.publicKey,
+            aciBinary: binaryUuid
+        )
+        let provisioning = Provisioning(ourPrivateKey: ours)
+        let creds = try await provisioning.link(envelopeData: envelope, deviceId: 2)
+        check(
+            "ProvisioningTests.testProvisionEnvelopeAciPrecedence",
+            creds.aci == "6838237d-02f6-4098-8110-698253d15961"
+        )
+    } catch {
+        check("ProvisioningTests.testProvisionEnvelopeAciPrecedence", false, "\(error)")
+    }
+
+    // A non-UUID string ACI with no binary form is rejected.
+    do {
+        let ours = PrivateKey.generate()
+        let (envelope, _) = try buildEnvelope(
+            aci: "not-a-uuid",
+            ourPublicKey: ours.publicKey
+        )
+        let provisioning = Provisioning(ourPrivateKey: ours)
+        do {
+            _ = try await provisioning.link(envelopeData: envelope, deviceId: 2)
+            check("ProvisioningTests.testProvisionEnvelopeAciShape", false, "no error thrown")
+        } catch let error as ProvisioningError {
+            check(
+                "ProvisioningTests.testProvisionEnvelopeAciShape",
+                error == .envelopeInvalid,
+                "got \(error)"
+            )
+        }
+    } catch {
+        check("ProvisioningTests.testProvisionEnvelopeAciShape", false, "\(error)")
     }
 }
 

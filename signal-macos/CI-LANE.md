@@ -26,17 +26,32 @@ Notes:
 
 ## libsignal FFI prerequisite
 
-`SignalCore` links `libsignal_ffi.a`, built from a pinned checkout:
+`SignalCore` links `libsignal_ffi.a`, built from a pinned checkout.
+`SignalCallsSpike` links `libringrtc.a` (macOS FFI build) and prebuilt
+`libwebrtc.a`. All three manifests resolve these by path **relative to
+themselves**, so fresh clones work if the checkouts live here (paths are
+relative to the repo root; run every `swift` command from `signal-macos/`):
 
 ```sh
-git clone https://github.com/signalapp/libsignal.git <vendor>/libsignal
-git -C <vendor>/libsignal checkout 4beb029d8a941f81e7d9c6d8af1ed25a677569a8
-# Needs cargo, rust-src component, and protoc on PATH, then:
-cd <vendor>/libsignal && ./swift/build_ffi.sh   # produces target/debug/libsignal_ffi.a
+VENDOR=.superpowers/sdd/2026-10-07-native-swift-spike/third-party
+# libsignal @ 4beb029d8a941f81e7d9c6d8af1ed25a677569a8
+git clone --depth 1 https://github.com/signalapp/libsignal.git $VENDOR/libsignal
+git -C $VENDOR/libsignal checkout 4beb029d8a941f81e7d9c6d8af1ed25a677569a8
+# needs: cargo, rust-src component, protoc on PATH
+(cd $VENDOR/libsignal && ./swift/build_ffi.sh)   # -> target/debug/libsignal_ffi.a
+
+# ringrtc @ <sha in GO-NO-GO.md>: apply the 5-line lite-FFI macOS cfg patch
+# documented there, then
+(cd $VENDOR/ringrtc && cargo build -p ringrtc)    # -> target/debug/libringrtc.a
+# prebuilt mac-arm64 WebRTC core:
+python3 $VENDOR/ringrtc/bin/fetch-artifact.py -p mac-arm64 \
+  --webrtc-version <see ringrtc/config/version.properties> \
+  -o $VENDOR/ringrtc-webrtc --archive-dir <anywhere-writable>
 ```
 
-Both `Package.swift` manifests point at that checkout
-(`libsignalSwiftPath`) and its `target/debug` dir (`ffiLibDir`);
-update both if the checkout moves. The AES known-answer fixture
+The manifests carry `-L` search dirs only in the workspace root
+`signal-macos/Package.swift` (relative `-L` differs per manifest, so it
+cannot live in the sub-package manifests without breaking root builds).
+The AES known-answer fixture
 (`Packages/SignalCore/Fixtures/aes-cbc-known-answer.json`) was
 generated with `openssl enc -aes-256-cbc` and is independent of `AesCbc`.

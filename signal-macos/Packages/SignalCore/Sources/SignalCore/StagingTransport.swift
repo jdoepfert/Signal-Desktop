@@ -28,6 +28,9 @@ public struct StagingTransport: Sendable {
         let net = Net(
             env: .staging,
             userAgent: "signal-macos-spike/0.0.0",
+            // Unverified guess: base remote-config keys against staging.
+            // Confirm against a live staging link in Phase 1; if the link
+            // fails, this variant is the first suspect.
             buildVariant: .production
         )
         let connection = try await net.connectProvisioning()
