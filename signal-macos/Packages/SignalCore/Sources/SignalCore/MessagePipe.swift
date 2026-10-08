@@ -122,7 +122,7 @@ public actor MessagePipe {
     private let transport: any SealedMessageTransport
     private let certs: any SenderCertProvider
     private let store: any SignalProtocolStore
-    // Kept for the send path (Task 5 reworks sealed-sender sends).
+    // Only the legacy `sendText` reads these; `OutgoingSender` is the real send path.
     private let ourAddress: ProtocolAddress
     private let trustRoots: [PublicKey]
     private let source: AsyncStream<IncomingEnvelope>?
@@ -178,6 +178,12 @@ public actor MessagePipe {
         receiver?.received ?? empty
     }
 
+    /// LEGACY spike path: one request per device, UNPADDED, no 409/410
+    /// handling and no sync transcript. The app no longer uses it; sending
+    /// goes through `OutgoingSender` (padding, all-device single request,
+    /// device-list repair, sent-sync, outbox). Kept only for the spike-era
+    /// tests that exercise the transport seam.
+    ///
     /// Sends `text` to `recipientAci`. `deviceId` is server-provided in
     /// production (device list fetch, Phase 1); the spike defaults to the
     /// primary device. With `devicesForRecipient` set, one envelope goes

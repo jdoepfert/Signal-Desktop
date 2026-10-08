@@ -113,6 +113,10 @@ await runAsync("ReceiveTests") {
     await runReceiveTests()
 }
 
+await runAsync("SendTests") {
+    await runSendTests()
+}
+
 run("PaddingTests") {
     runPaddingTests()
     runContentVectorTests()

@@ -37,6 +37,35 @@ public struct LivePreKeyService: PreKeyService {
     }
 }
 
+extension LivePreKeyService: PreKeyBundleFetching {
+    /// Send-path fetch. Authorized with the recipient's access key when we
+    /// have their profile key, else unrestricted unauthenticated access
+    /// (works for accounts that allow it). There is no authenticated
+    /// prekey fetch in the pinned libsignal, so an account that requires an
+    /// access key we do not have cannot be reached until its profile key is
+    /// known.
+    public func fetchBundles(
+        for aci: String,
+        deviceIds: [UInt32]?,
+        accessKey: Data?
+    ) async throws -> [PreKeyBundle] {
+        let target = try LiveTransport.serviceId(aci)
+        let auth: UserBasedAuthorization =
+            accessKey.map { .accessKey($0) } ?? .unrestrictedUnauthenticatedAccess
+        guard let deviceIds else {
+            return try await keys.getPreKeys(for: target, device: .allDevices, auth: auth).1
+        }
+        var out = [PreKeyBundle]()
+        for id in deviceIds {
+            guard let device = DeviceId(validating: id) else {
+                continue
+            }
+            out += try await keys.getPreKeys(for: target, device: .specificDevice(device), auth: auth).1
+        }
+        return out
+    }
+}
+
 /// Ensures a usable session exists before encrypting: checks the store,
 /// and on a miss fetches the recipient's bundles and processes the first
 /// one for the requested device.

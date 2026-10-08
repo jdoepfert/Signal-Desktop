@@ -14,6 +14,7 @@ import SignalStorage
 private struct LiveStack {
     let database: SignalDatabase
     let pipe: MessagePipe
+    let sender: OutgoingSender
     let receiver: EnvelopeReceiver
     let chat: ChatSession
     let conversations: ConversationStore
@@ -110,23 +111,16 @@ public final class AppState: ObservableObject {
         }
         let aci = String(selection.dropFirst(4))
         do {
-            try await stack.pipe.sendText(text, to: aci)
-            // Persist our side so the thread shows both directions.
-            if let ownAci = linkedAci {
-                _ = try stack.messages.save(
-                    senderAci: ownAci,
-                    body: text,
-                    timestamp: Self.nowMs(),
-                    conversationId: selection
-                )
-            }
-            _ = try stack.conversations.conversation(forAci: aci)
-            try stack.conversations.touch(selection, timestamp: Self.nowMs())
-            refreshConversations()
-            await reloadThread()
+            // OutgoingSender writes the outgoing row (status pending) before
+            // the network call, updates it to sent/failed, and returns the
+            // timestamp that is the row's sent_timestamp.
+            _ = try await stack.sender.sendText(text, to: aci)
         } catch {
             self.error = String(describing: error)
         }
+        // Success or failure, the row (sent or failed) is in the store.
+        refreshConversations()
+        await reloadThread()
     }
 
     public func select(_ id: String?) {
@@ -219,14 +213,13 @@ public final class AppState: ObservableObject {
         })
         let certs = SenderCertService(fetch: { try await certFetcher.fetchCertificate() })
         let keyService = LivePreKeyService(keys: unauth)
-        let sessions = SessionSetup(
-            keys: keyService,
-            store: protocolStore,
-            ourAddress: try ProtocolAddress(name: creds.aci, deviceId: creds.deviceId)
-        )
 
         let chat = ChatSession()
-        let live = LiveTransport(messages: unauth, incoming: chat.incoming())
+        let live = LiveTransport(
+            messages: unauth,
+            incoming: chat.incoming(),
+            authenticatedSend: { request in try await chat.send(request) }
+        )
         let messages = MessageStore(queue: database.queue)
         let trustRoots = TrustRoots.forEnvironment(environment)
         let receiver = try EnvelopeReceiver(
@@ -244,25 +237,34 @@ public final class AppState: ObservableObject {
             ourAddress: try ProtocolAddress(name: creds.aci, deviceId: creds.deviceId),
             trustRoots: trustRoots,
             receiver: receiver,
-            incomingSource: nil,
-            devicesForRecipient: { recipient in
-                try await sessions.ensureAllSessions(with: recipient).map { device in
-                    (deviceId: device.deviceId, registrationId: device.registrationId)
-                }
-            }
+            incomingSource: nil
+        )
+        let conversations = ConversationStore(queue: database.queue)
+        let contactTable = ContactTable(queue: database.queue)
+        let sender = OutgoingSender(
+            store: protocolStore,
+            identity: identityStore,
+            messages: messages,
+            contacts: contactTable,
+            conversations: conversations,
+            ourAci: creds.aci,
+            ourDeviceId: creds.deviceId,
+            certs: certs,
+            bundles: keyService,
+            submitter: live
         )
         // Envelopes acked last session but not yet committed replay BEFORE
         // the socket opens, so they land ahead of anything new.
         await receiver.replayUnprocessed()
         try await chat.connect(credentials: creds)
-        let conversations = ConversationStore(queue: database.queue)
         let contacts = ContactStore(
-            contacts: ContactTable(queue: database.queue),
+            contacts: contactTable,
             profiles: ProfileFetcher { _ in nil }
         )
         stack = LiveStack(
             database: database,
             pipe: pipe,
+            sender: sender,
             receiver: receiver,
             chat: chat,
             conversations: conversations,
@@ -273,6 +275,12 @@ public final class AppState: ObservableObject {
         // The receive pump never runs unless the pipe's envelope pump is
         // started: without this the app sends but never receives.
         await pipe.start()
+        // Outbox: rows a crash left pending (older than 30 s) get exactly
+        // one retry, then fail.
+        Task {
+            _ = await sender.recoverPending(now: Self.nowMs())
+            await self.reloadThread()
+        }
         pumpTask = Task {
             await self.pump()
         }

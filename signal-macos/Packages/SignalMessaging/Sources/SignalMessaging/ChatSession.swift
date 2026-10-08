@@ -12,14 +12,23 @@ public struct ChatSessionConnection: Sendable {
     /// Closes the socket (idempotent; errors are swallowed, the connection
     /// is going away either way).
     public let close: @Sendable () async -> Void
+    /// Sends a request over this authenticated socket (nil in fakes that
+    /// do not model it).
+    public let send: (@Sendable (ChatRequest) async throws -> (status: UInt16, body: Data))?
 
     public init(
         envelopes: AsyncStream<IncomingEnvelope>,
-        close: @escaping @Sendable () async -> Void = {}
+        close: @escaping @Sendable () async -> Void = {},
+        send: (@Sendable (ChatRequest) async throws -> (status: UInt16, body: Data))? = nil
     ) {
         self.envelopes = envelopes
         self.close = close
+        self.send = send
     }
+}
+
+public enum ChatSessionError: Error, Equatable {
+    case notConnected
 }
 
 /// One authenticated chat session opener. The live implementation builds a
@@ -65,6 +74,10 @@ public struct LiveChatConnector: ChatConnector {
                 // finishes the stream.
                 try? await connection.disconnect()
                 continuation.finish()
+            },
+            send: { request in
+                let response = try await connection.send(request)
+                return (response.status, response.body)
             }
         )
     }
@@ -120,6 +133,7 @@ public actor ChatSession {
     private let stream: AsyncStream<IncomingEnvelope>
     private var pumpTask: Task<Void, Never>?
     private var closeCurrent: (@Sendable () async -> Void)?
+    private var sendCurrent: (@Sendable (ChatRequest) async throws -> (status: UInt16, body: Data))?
     private var outputFinished = false
     private var disconnected = false
 
@@ -152,6 +166,7 @@ public actor ChatSession {
             environment: credentials.environment
         )
         closeCurrent = session.close
+        sendCurrent = session.send
         pumpTask = Task {
             await self.pump(
                 first: session.envelopes,
@@ -163,6 +178,15 @@ public actor ChatSession {
 
     public nonisolated func incoming() -> AsyncStream<IncomingEnvelope> {
         stream
+    }
+
+    /// Sends a request over the CURRENT authenticated socket (follows
+    /// reconnects). Throws `notConnected` when there is none.
+    public func send(_ request: ChatRequest) async throws -> (status: UInt16, body: Data) {
+        guard let sendCurrent else {
+            throw ChatSessionError.notConnected
+        }
+        return try await sendCurrent(request)
     }
 
     /// Stops reconnecting, ends `incoming()` and closes the socket.
@@ -178,6 +202,7 @@ public actor ChatSession {
         }
         let close = closeCurrent
         closeCurrent = nil
+        sendCurrent = nil
         await close?()
     }
 
@@ -223,6 +248,7 @@ public actor ChatSession {
                     return
                 }
                 closeCurrent = opened.close
+                sendCurrent = opened.send
                 current = opened.envelopes
                 // A successful connect ends the backoff sequence: the
                 // next drop starts over at the initial delay.
