@@ -256,6 +256,20 @@ public final class MessageStore: Sendable, MessageWriting {
         }
     }
 
+    /// One message by its identity (sender, sent timestamp).
+    public func message(senderAci: String, timestamp: UInt64) throws -> StoredMessage? {
+        try queue.read { db in
+            try StoredMessage.fetchOne(
+                db,
+                sql: """
+                    SELECT \(Self.columns) FROM messages
+                    WHERE sender_aci = ? AND sent_timestamp = ?
+                    """,
+                arguments: [senderAci, Int64(bitPattern: timestamp)]
+            )
+        }
+    }
+
     /// Outgoing rows still `pending`, oldest first.
     public func pendingOutgoing() throws -> [StoredMessage] {
         try queue.read { db in

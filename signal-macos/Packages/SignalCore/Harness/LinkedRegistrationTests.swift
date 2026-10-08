@@ -135,6 +135,9 @@ func runLinkedRegistrationTests() async {
         check("MessagingTests.testLinkedRegistration", false, "\(error)")
     }
 
+    await testLinkRequestIncludesNameAndCapabilities()
+    testDeviceNameVector()
+
     // Rejection surfaces the status; garbage body surfaces invalidResponse.
     do {
         let db = try SignalDatabase.open(path: nil, key: "k")
@@ -175,5 +178,76 @@ func runLinkedRegistrationTests() async {
         }
     } catch {
         check("MessagingTests.testRegistrationRejected", false, "\(error)")
+    }
+}
+
+// Desktop's link request carries the encrypted device name and the full
+// capability set (`linkDevice` in WebAPI.preload.ts).
+private func testLinkRequestIncludesNameAndCapabilities() async {
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let transport = FakeRegistrationTransport()
+        let account = makeAccount()
+        let registration = LinkedDeviceRegistration(
+            transport: transport,
+            store: InMemorySignalProtocolStore(),
+            identityStore: GRDBIdentityStore(queue: db.queue),
+            accounts: AccountTable(queue: db.queue)
+        )
+        _ = try await registration.register(account: account, environment: .staging)
+        let body = try JSONSerialization.jsonObject(with: transport.recorded[0].body) as? [String: Any]
+        let attrs = body?["accountAttributes"] as? [String: Any]
+        let capabilities = attrs?["capabilities"] as? [String: Bool]
+        let nameBytes = (attrs?["name"] as? String).flatMap { Data(base64Encoded: $0) }
+        let decrypted = try nameBytes.map {
+            try DeviceName.decrypt($0, identityPrivate: account.aciIdentity.privateKey)
+        }
+        // Encrypted to the ACI identity (not the PNI one).
+        let wrongKey: String? = nameBytes.flatMap {
+            try? DeviceName.decrypt($0, identityPrivate: account.pniIdentity.privateKey)
+        }
+        check(
+            "MessagingTests.testLinkRequestIncludesNameAndCapabilities",
+            decrypted == LinkedDeviceRegistration.defaultDeviceName && wrongKey == nil
+                && capabilities == [
+                    "attachmentBackfill": true,
+                    "spqr": true,
+                    "usernameChangeSyncMessage": true,
+                    "optionalPhoneNumber": false,
+                ]
+                && (attrs?["fetchesMessages"] as? Bool) == true
+                && attrs?["registrationId"] != nil && attrs?["pniRegistrationId"] != nil
+                && !(String(data: transport.recorded[0].body, encoding: .utf8) ?? "")
+                    .contains(LinkedDeviceRegistration.defaultDeviceName),
+            "decrypted=\(String(describing: decrypted)) capabilities=\(String(describing: capabilities))"
+        )
+    } catch {
+        check("MessagingTests.testLinkRequestIncludesNameAndCapabilities", false, "\(error)")
+    }
+}
+
+// The golden vector from Desktop's algorithm (generate.mjs): our encrypt
+// with the vector's ephemeral key reproduces the bytes exactly, and the
+// bytes decrypt back to the name with the identity private key.
+private func testDeviceNameVector() {
+    do {
+        let vector = try Vectors.load("device-name")
+        let hex = { (key: String) in Vectors.data(hex: vector[key] as! String)! }
+        let identity = try PrivateKey(hex("identityPrivate"))
+        let encrypted = try DeviceName.encrypt(
+            vector["name"] as! String,
+            identityPublic: identity.publicKey,
+            ephemeral: PrivateKey(hex("ephemeralPrivate"))
+        )
+        let decrypted = try DeviceName.decrypt(hex("encrypted"), identityPrivate: identity)
+        var tampered = hex("encrypted")
+        tampered[tampered.count - 1] ^= 1
+        let tamperedFails = (try? DeviceName.decrypt(tampered, identityPrivate: identity)) == nil
+        check(
+            "MessagingTests.testDeviceNameVector",
+            encrypted == hex("encrypted") && decrypted == (vector["name"] as! String) && tamperedFails
+        )
+    } catch {
+        check("MessagingTests.testDeviceNameVector", false, "\(error)")
     }
 }

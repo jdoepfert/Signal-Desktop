@@ -363,6 +363,10 @@ func runSendTests() async {
     await testFirstContactWithoutProfileKeyUsesAuthenticatedFetch()
     await testUnauthorizedAccessKeyFetchFallsBackToAuthenticated()
     await testAuthenticatedFetchStatusMapping()
+    await testChangedIdentitySendThrowsIdentityChanged()
+    await testAcceptNewIdentityThenSendSucceeds()
+    await testResendAfterAcceptKeepsOneRow()
+    await testSyncTranscriptIsNotUrgent()
     await testCertFetchFailureFallsBackAndLogs()
     await testSenderCertFetcherRequestAndParsing()
 }
@@ -811,7 +815,7 @@ private func testSendToChangedIdentityThrows() async {
         }
         try checkT(
             "SendTests.testSendToChangedIdentityThrows",
-            (thrown as? SendError) == .untrustedIdentity(theirAci)
+            (thrown as? SendError) == .identityChanged(theirAci)
                 && f.submitter.requests.isEmpty
                 && activeBefore == [1, 2, 3]
                 // Desktop archives all sessions of the recipient.
@@ -1231,5 +1235,117 @@ private func testSenderCertFetcherRequestAndParsing() async {
         )
     } catch {
         check("SendTests.testSenderCertFetcherRequestAndParsing", false, "\(error)")
+    }
+}
+
+// MARK: - Changed identity (fix round A, F4)
+
+/// The contact reinstalled: every device re-registers with a NEW identity
+/// key, so the next bundle fetch presents it.
+private func reregisterAll(_ f: SendFixture, ids: [UInt32] = [1, 2, 3]) throws -> IdentityKey {
+    let identity = IdentityKeyPair.generate()
+    for id in ids {
+        f.bundles.register(try RemoteDevice(aci: theirAci, deviceId: id, identity: identity))
+    }
+    return identity.identityKey
+}
+
+// The 410 repair path: our sessions are stale, the refetched bundle carries
+// a different identity key, so libsignal refuses it while sending. That
+// must surface as the typed error (not a raw libsignal error), with the
+// sessions archived and nothing submitted for the refused devices.
+private func testChangedIdentitySendThrowsIdentityChanged() async {
+    do {
+        let f = try makeFixture(unestablished: [], script: [.stale([1, 2, 3])])
+        _ = try reregisterAll(f)
+        var thrown: Error?
+        do {
+            _ = try await f.sender.send(textContent("x", 1_700_000_300_001), to: theirAci, timestamp: 1_700_000_300_001)
+        } catch {
+            thrown = error
+        }
+        try checkT(
+            "SendTests.testChangedIdentitySendThrowsIdentityChanged",
+            (thrown as? SendError) == .identityChanged(theirAci)
+                && f.submitter.requests.count == 1
+                && (try activeDevices(f)).isEmpty,
+            "thrown=\(String(describing: thrown)) requests=\(f.submitter.requests.count)"
+        )
+    } catch {
+        check("SendTests.testChangedIdentitySendThrowsIdentityChanged", false, "\(error)")
+    }
+}
+
+// After the user accepts the new key, a retry succeeds: the key the fetched
+// bundles present is saved as trusted and sessions are rebuilt from the
+// SAME fetch (one-time prekeys are not burned twice).
+private func testAcceptNewIdentityThenSendSucceeds() async {
+    do {
+        let f = try makeFixture(unestablished: [], script: [.stale([1, 2, 3])])
+        let newKey = try reregisterAll(f)
+        do {
+            _ = try await f.sender.send(textContent("x", 1_700_000_300_002), to: theirAci, timestamp: 1_700_000_300_002)
+        } catch SendError.identityChanged {
+            // expected
+        }
+        let fetchesBeforeAccept = f.bundles.calls.count
+        try await f.sender.acceptNewIdentity(aci: theirAci)
+        let saved = try f.rig.identity.identity(for: ProtocolAddress(name: theirAci, deviceId: 1), context: NullContext())
+        let fetchesAfterAccept = f.bundles.calls.count
+        _ = try await f.sender.send(textContent("again", 1_700_000_300_003), to: theirAci, timestamp: 1_700_000_300_003)
+        let requests = f.submitter.requests
+        try checkT(
+            "SendTests.testAcceptNewIdentityThenSendSucceeds",
+            saved == newKey && requests.count == 2 && deviceIds(requests[1]) == [1, 2, 3]
+                && fetchesAfterAccept == fetchesBeforeAccept + 1
+                && f.bundles.calls.count == fetchesAfterAccept
+                && requests[1].timestamp == 1_700_000_300_003,
+            "saved=\(saved == newKey) requests=\(requests.count) fetches=\(fetchesBeforeAccept)/\(fetchesAfterAccept)/\(f.bundles.calls.count)"
+        )
+    } catch {
+        check("SendTests.testAcceptNewIdentityThenSendSucceeds", false, "\(error)")
+    }
+}
+
+// "Accept & resend": the failed row is re-sent with its own timestamp, so
+// the thread keeps ONE row for the message.
+private func testResendAfterAcceptKeepsOneRow() async {
+    do {
+        let f = try makeFixture(unestablished: [], script: [.stale([1, 2, 3])])
+        _ = try reregisterAll(f)
+        var failedTimestamp: UInt64?
+        do {
+            _ = try await f.sender.sendText("hello again", to: theirAci)
+        } catch SendError.identityChanged {
+            failedTimestamp = try f.rig.messages.all().first?.timestamp
+        }
+        let statusBefore = try f.rig.messages.all().first?.status
+        try await f.sender.acceptNewIdentity(aci: theirAci)
+        try await f.sender.resendText(timestamp: failedTimestamp ?? 0, to: theirAci)
+        let rows = try f.rig.messages.all().filter { $0.senderAci == ourAci && $0.body == "hello again" }
+        try checkT(
+            "SendTests.testResendAfterAcceptKeepsOneRow",
+            statusBefore == "failed" && rows.count == 1 && rows[0].status == "sent"
+                && rows[0].timestamp == failedTimestamp,
+            "statusBefore=\(String(describing: statusBefore)) rows=\(rows)"
+        )
+    } catch {
+        check("SendTests.testResendAfterAcceptKeepsOneRow", false, "\(error)")
+    }
+}
+
+// Desktop sends the sent-sync transcript non-urgent.
+private func testSyncTranscriptIsNotUrgent() async {
+    do {
+        let f = try makeFixture()
+        _ = try await f.sender.sendText("sync me", to: theirAci)
+        let requests = f.submitter.requests
+        let transcript = requests.first { $0.destination == ourAci }
+        try checkT(
+            "SendTests.testSyncTranscriptIsNotUrgent",
+            requests.count == 2 && requests[0].urgent && transcript?.urgent == false
+        )
+    } catch {
+        check("SendTests.testSyncTranscriptIsNotUrgent", false, "\(error)")
     }
 }

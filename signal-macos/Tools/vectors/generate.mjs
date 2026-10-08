@@ -115,6 +115,77 @@ const profileKey = seeded('profile-key', 32);
   });
 }
 
+// --- Device name (mirror of ts/Crypto.node.ts encryptDeviceName) -----------
+// Deterministic: the ephemeral key is seeded. The protobuf is Desktop's own
+// protos/DeviceName.proto, encoded with protobufjs.
+{
+  const hmac = (key, data) =>
+    crypto.createHmac('sha256', key).update(data).digest();
+  const aes = (key, data) => {
+    const cipher = crypto.createCipheriv(
+      'aes-256-ctr',
+      key,
+      Buffer.alloc(16)
+    );
+    return Buffer.concat([cipher.update(data), cipher.final()]);
+  };
+  const identity = privKey('device-name/identity');
+  const ephemeral = privKey('device-name/ephemeral');
+  const name = 'Signal Desktop (macOS native)';
+  const plaintext = Buffer.from(name, 'utf8');
+
+  const masterSecret = ephemeral.agree(identity.getPublicKey());
+  const key1 = hmac(masterSecret, 'auth');
+  const syntheticIv = hmac(key1, plaintext).subarray(0, 16);
+  const key2 = hmac(masterSecret, 'cipher');
+  const cipherKey = hmac(key2, syntheticIv);
+  const ciphertext = aes(cipherKey, plaintext);
+
+  const deviceNameRoot = await protobuf.load(
+    path.join(repoRoot, 'protos/DeviceName.proto')
+  );
+  const DeviceName = deviceNameRoot.lookupType('signalservice.DeviceName');
+  const encoded = Buffer.from(
+    DeviceName.encode(
+      DeviceName.create({
+        ephemeralPublic: ephemeral.getPublicKey().serialize(),
+        syntheticIv,
+        ciphertext,
+      })
+    ).finish()
+  );
+
+  // Self-check: decrypt the way Desktop's decryptDeviceName does.
+  const decoded = DeviceName.decode(encoded);
+  const secret2 = identity.agree(
+    ls.PublicKey.deserialize(Buffer.from(decoded.ephemeralPublic))
+  );
+  const decKey = hmac(
+    hmac(secret2, 'cipher'),
+    Buffer.from(decoded.syntheticIv)
+  );
+  const decipher = crypto.createDecipheriv(
+    'aes-256-ctr',
+    decKey,
+    Buffer.alloc(16)
+  );
+  const roundTrip = Buffer.concat([
+    decipher.update(Buffer.from(decoded.ciphertext)),
+    decipher.final(),
+  ]).toString('utf8');
+  if (roundTrip !== name) {
+    throw new Error('device-name self-check failed');
+  }
+
+  write('device-name', {
+    name,
+    identityPrivate: hex(identity.serialize()),
+    identityPublic: hex(identity.getPublicKey().serialize()),
+    ephemeralPrivate: hex(ephemeral.serialize()),
+    encrypted: hex(encoded),
+  });
+}
+
 // --- Provisioning (phone side, mirror of ProvisioningCipher.decrypt) -------
 {
   const aci = '11111111-2222-4333-8444-555555555555';

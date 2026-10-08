@@ -125,7 +125,7 @@ run("PaddingTests") {
 run("VectorTests") {
     check(
         "VectorTests.testLoadsAll",
-        ["padding", "provisioning", "envelopes", "access-key", "content"]
+        ["padding", "provisioning", "envelopes", "access-key", "content", "device-name"]
             .allSatisfy { (try? Vectors.load($0)) != nil }
     )
 }

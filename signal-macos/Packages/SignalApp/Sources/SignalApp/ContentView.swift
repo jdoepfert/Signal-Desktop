@@ -33,6 +33,27 @@ public struct ContentView: View {
             .onAppear {
                 state.refreshConversations()
             }
+            .alert(
+                "Safety number changed",
+                isPresented: Binding(
+                    get: { state.identityPrompt != nil },
+                    set: { if !$0 { state.dismissIdentityChange() } }
+                ),
+                presenting: state.identityPrompt
+            ) { prompt in
+                Button("Send anyway") {
+                    // The prompt is captured: dismissing the alert clears
+                    // `state.identityPrompt` before this task runs.
+                    Task {
+                        await state.acceptIdentityChange(prompt)
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    state.dismissIdentityChange()
+                }
+            } message: { prompt in
+                Text("Safety number changed for \(state.cachedName(for: prompt.aci)). Send anyway?")
+            }
         } else {
             OnboardingWindow(
                 address: state.address,

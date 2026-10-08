@@ -47,6 +47,8 @@ private struct SignedPreKeyJSON: Encodable {
 
 private struct AccountAttributesJSON: Encodable {
     let fetchesMessages: Bool
+    /// Base64 `DeviceName` protobuf, encrypted to the ACI identity key.
+    let name: String?
     let registrationId: UInt32
     let pniRegistrationId: UInt32
     let capabilities: [String: Bool]
@@ -73,8 +75,8 @@ private struct LinkDeviceResponse: Decodable {
 /// registration ids, in one transaction), THEN generates the prekeys:
 /// ACI prekeys are signed by the ACI identity and PNI prekeys by the PNI
 /// identity. Signed EC prekey and kyber last-resort prekey get the fixed
-/// ids below; key rotation/top-up arrives later. Empty device name
-/// (omitted field).
+/// ids below; key rotation/top-up arrives later. The device name is sent
+/// encrypted to the ACI identity key (`DeviceName`).
 public struct LinkedDeviceRegistration: Sendable {
     /// Prekey ids. The protocol store has no per-service-id partition, so
     /// the PNI keys take their own ids rather than shadowing the ACI ones.
@@ -85,17 +87,23 @@ public struct LinkedDeviceRegistration: Sendable {
     private let store: any SignalProtocolStore
     private let identityStore: any AccountIdentityStoring
     private let accounts: AccountTable
+    private let deviceName: String
+
+    /// The name shown in the primary device's linked-devices list.
+    public static let defaultDeviceName = "Signal Desktop (macOS native)"
 
     public init(
         transport: any RegistrationTransport,
         store: any SignalProtocolStore,
         identityStore: any AccountIdentityStoring,
-        accounts: AccountTable
+        accounts: AccountTable,
+        deviceName: String = LinkedDeviceRegistration.defaultDeviceName
     ) {
         self.transport = transport
         self.store = store
         self.identityStore = identityStore
         self.accounts = accounts
+        self.deviceName = deviceName
     }
 
     public func register(
@@ -162,16 +170,28 @@ public struct LinkedDeviceRegistration: Sendable {
         let aci = account.aci
         let provisioningCode = account.provisioningCode
 
+        // Desktop (`linkDevice`, `encryptDeviceName`): the name is encrypted to
+        // the account's ACI identity PUBLIC key; an empty name is omitted.
+        let encryptedName: String? = deviceName.isEmpty
+            ? nil
+            : try DeviceName.encrypt(deviceName, identityPublic: account.aciIdentity.publicKey)
+                .base64EncodedString()
+        // Desktop sends `optionalPhoneNumber: !hasE164`. This flow always
+        // links with the PNI keys and number the primary provisioned (the
+        // hasE164 path), so it is false here.
+        let hasE164 = !account.number.isEmpty
         let body = LinkDeviceBody(
             verificationCode: provisioningCode,
             accountAttributes: AccountAttributesJSON(
                 fetchesMessages: true,
+                name: encryptedName,
                 registrationId: registrationId,
                 pniRegistrationId: pniRegistrationId,
                 capabilities: [
                     "attachmentBackfill": true,
                     "spqr": true,
                     "usernameChangeSyncMessage": true,
+                    "optionalPhoneNumber": !hasE164,
                 ]
             ),
             aciSignedPreKey: aciKeys.signed,

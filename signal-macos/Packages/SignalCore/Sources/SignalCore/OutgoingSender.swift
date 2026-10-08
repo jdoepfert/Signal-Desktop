@@ -96,9 +96,13 @@ public enum SendError: Error, Equatable {
     /// (`OutgoingMessage.preload.ts`: "Hit retry limit").
     case staleRetryLimit
     case unauthorized
-    /// The recipient's identity key changed since we last saw it. All
-    /// sessions with them were archived, as Desktop does.
-    case untrustedIdentity(String)
+    /// The recipient's identity key changed since we last saw it (their
+    /// safety number changed). All sessions with them were archived, as
+    /// Desktop does. The send is refused until the user accepts the new key:
+    /// `OutgoingSender.acceptNewIdentity(aci:)`, then retry.
+    case identityChanged(String)
+    /// `resendText` found no failed outgoing message with that timestamp.
+    case noSuchMessage
     case unregisteredUser
     case noDevices
     case server(status: UInt16)
@@ -214,6 +218,50 @@ public actor OutgoingSender {
         return timestamp
     }
 
+    /// The user accepted a contact's changed identity ("Safety number
+    /// changed ... Send anyway?"). Archives every session with them, fetches
+    /// their CURRENT bundles, saves the identity key those bundles present as
+    /// trusted for each device, and starts fresh sessions from the same fetch
+    /// (so a retry needs no further prekey fetch). Receiving never needs this:
+    /// inbound identity changes are trusted automatically.
+    public func acceptNewIdentity(aci: String) async throws {
+        let aci = aci.lowercased()
+        try store.archiveAllSessions(forAci: aci)
+        try await fetchAndEstablish(
+            aci,
+            deviceIds: nil,
+            excluding: aci == ourAci ? ourDeviceId : nil,
+            trustPresentedIdentity: true
+        )
+    }
+
+    /// Re-sends a message whose send failed (e.g. `identityChanged`) under
+    /// its original timestamp, keeping a single row for it.
+    public func resendText(timestamp: UInt64, to aci: String) async throws {
+        let aci = aci.lowercased()
+        guard
+            let row = try messages.message(senderAci: ourAci, timestamp: timestamp),
+            row.status == MessageStatus.failed
+        else {
+            throw SendError.noSuchMessage
+        }
+        markStatus(row.rowId, MessageStatus.pending)
+        do {
+            let version = try conversations.expireTimer("aci:\(aci)").version
+            try await transmitText(
+                row.body,
+                to: aci,
+                timestamp: row.timestamp,
+                timer: row.expireTimer,
+                version: version
+            )
+        } catch {
+            markStatus(row.rowId, MessageStatus.failed)
+            throw error
+        }
+        markStatus(row.rowId, MessageStatus.sent)
+    }
+
     /// Launch-time outbox pass. Each `pending` row older than 30 s is
     /// retried ONCE; success marks it `sent`, any failure marks it `failed`,
     /// so a row is never retried a second time. Younger rows are left alone
@@ -302,7 +350,8 @@ public actor OutgoingSender {
         syncContent.syncMessage = sync
         do {
             let padded = Padding.pad(try syncContent.serializedData())
-            try await deliver(padded, to: ourAci, timestamp: timestamp, sealed: false)
+            // Desktop sends the transcript non-urgent.
+            try await deliver(padded, to: ourAci, timestamp: timestamp, sealed: false, urgent: false)
         } catch {
             // The recipient already has the message; a missing transcript
             // only means our other devices miss it. Not a send failure.
@@ -356,7 +405,8 @@ public actor OutgoingSender {
         _ padded: Data,
         to aci: String,
         timestamp: UInt64,
-        sealed: Bool
+        sealed: Bool,
+        urgent: Bool = true
     ) async throws {
         let excluding: UInt32? = aci == ourAci ? ourDeviceId : nil
         let sealedKey = sealed ? knownAccessKey(for: aci) : nil
@@ -371,7 +421,8 @@ public actor OutgoingSender {
                 to: aci,
                 timestamp: timestamp,
                 auth: auth,
-                excluding: excluding
+                excluding: excluding,
+                urgent: urgent
             ) else {
                 return
             }
@@ -395,7 +446,7 @@ public actor OutgoingSender {
                 guard mayRecurse else {
                     throw SendError.staleRetryLimit
                 }
-                try await repair(aci, missing: missing, extra: extra, stale: [], excluding: excluding)
+                try await repairTranslatingIdentity(aci, missing: missing, extra: extra, stale: [], excluding: excluding)
                 mayRecurse = true
             case .stale(let devices):
                 mismatches += 1
@@ -405,7 +456,7 @@ public actor OutgoingSender {
                 guard mayRecurse else {
                     throw SendError.staleRetryLimit
                 }
-                try await repair(aci, missing: [], extra: [], stale: devices, excluding: excluding)
+                try await repairTranslatingIdentity(aci, missing: [], extra: [], stale: devices, excluding: excluding)
                 // Stale-only: try once more, and no further.
                 mayRecurse = false
             }
@@ -420,7 +471,8 @@ public actor OutgoingSender {
         to aci: String,
         timestamp: UInt64,
         auth: SendAuth,
-        excluding: UInt32?
+        excluding: UInt32?,
+        urgent: Bool = true
     ) async throws -> SendRequest? {
         do {
             var devices = try store.activeSessionDevices(forAci: aci).filter { $0.deviceId != excluding }
@@ -454,13 +506,14 @@ public actor OutgoingSender {
                 destination: aci,
                 timestamp: timestamp,
                 messages: encrypted,
-                auth: effectiveAuth
+                auth: effectiveAuth,
+                urgent: urgent
             )
         } catch SignalError.untrustedIdentity {
             // Desktop: archive every session with the recipient, surface
             // the error. The transaction already rolled back.
             try? store.archiveAllSessions(forAci: aci)
-            throw SendError.untrustedIdentity(aci)
+            throw SendError.identityChanged(aci)
         }
     }
 
@@ -512,6 +565,24 @@ public actor OutgoingSender {
 
     // MARK: Sessions
 
+    /// `repair`, with a refused (changed) identity surfaced as the typed
+    /// error exactly like in `buildRequest`: the usual way to meet a changed
+    /// key is the refetch after a 410 for a re-registered device.
+    private func repairTranslatingIdentity(
+        _ aci: String,
+        missing: [UInt32],
+        extra: [UInt32],
+        stale: [UInt32],
+        excluding: UInt32?
+    ) async throws {
+        do {
+            try await repair(aci, missing: missing, extra: extra, stale: stale, excluding: excluding)
+        } catch SignalError.untrustedIdentity {
+            try? store.archiveAllSessions(forAci: aci)
+            throw SendError.identityChanged(aci)
+        }
+    }
+
     /// `handleMismatchedDevicesError`: sessions for extra and stale devices
     /// are archived; bundles are fetched for missing and stale ones.
     private func repair(
@@ -539,7 +610,8 @@ public actor OutgoingSender {
     private func fetchAndEstablish(
         _ aci: String,
         deviceIds: [UInt32]?,
-        excluding: UInt32?
+        excluding: UInt32?,
+        trustPresentedIdentity: Bool = false
     ) async throws {
         let fetched = try await bundles.fetchBundles(
             for: aci,
@@ -556,6 +628,11 @@ public actor OutgoingSender {
                    try store.loadSession(for: address, context: context)?.hasCurrentState == true
                 {
                     continue
+                }
+                if trustPresentedIdentity {
+                    // The user accepted the new safety number: record the
+                    // key the server presents BEFORE libsignal compares it.
+                    _ = try store.saveIdentity(bundle.identityKey, for: address, context: context)
                 }
                 try processPreKeyBundle(
                     bundle,

@@ -12,7 +12,8 @@ npm install
 node generate.mjs
 ```
 
-All byte fields are lowercase hex. `padding`, `access-key`, `content` and
+All byte fields are lowercase hex. `padding`, `access-key`, `device-name` (Desktop's
+`encryptDeviceName` with a seeded ephemeral key), `content` and
 `provisioning` are deterministic (fixed seeds), so a second run leaves
 `git diff` empty. `envelopes.json` is NOT deterministic: libsignal draws
 ephemeral keys and the Kyber key pair from the OS RNG, so every run rewrites

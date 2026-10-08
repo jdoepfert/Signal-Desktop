@@ -22,6 +22,15 @@ private struct LiveStack {
     let messages: MessageStore
 }
 
+/// A send refused because the contact's safety number changed; the user
+/// can accept the new key and resend.
+public struct IdentityChangePrompt: Equatable, Identifiable {
+    public let aci: String
+    /// `sent_timestamp` of the failed outgoing row to resend.
+    public let timestamp: UInt64
+    public var id: String { aci }
+}
+
 /// Application state: onboarding → linked → conversations. Lives on the
 /// main actor; the receive pump forwards pipe messages into the thread view
 /// model and conversation list. 1:1 conversations only — group threads
@@ -34,6 +43,7 @@ public final class AppState: ObservableObject {
     @Published public var selection: String?
     @Published public var clockSkewed = false
     @Published public var error: String?
+    @Published public var identityPrompt: IdentityChangePrompt?
 
     public let thread = ConversationViewModel()
     public let composer = ComposerState()
@@ -115,12 +125,42 @@ public final class AppState: ObservableObject {
             // the network call, updates it to sent/failed, and returns the
             // timestamp that is the row's sent_timestamp.
             _ = try await stack.sender.sendText(text, to: aci)
+        } catch SendError.identityChanged(let changedAci) {
+            // The failed row is the newest in the thread: offer to accept
+            // the new key and resend that row.
+            let failed = try? stack.messages.page(in: selection, limit: 1).first
+            if let failed, failed.status == MessageStatus.failed {
+                identityPrompt = IdentityChangePrompt(aci: changedAci, timestamp: failed.timestamp)
+            } else {
+                self.error = String(describing: SendError.identityChanged(changedAci))
+            }
         } catch {
             self.error = String(describing: error)
         }
         // Success or failure, the row (sent or failed) is in the store.
         refreshConversations()
         await reloadThread()
+    }
+
+    /// "Send anyway" on the safety-number alert: trust the key the server
+    /// presents now, then resend the failed message.
+    public func acceptIdentityChange(_ prompt: IdentityChangePrompt) async {
+        guard let stack else {
+            return
+        }
+        identityPrompt = nil
+        do {
+            try await stack.sender.acceptNewIdentity(aci: prompt.aci)
+            try await stack.sender.resendText(timestamp: prompt.timestamp, to: prompt.aci)
+        } catch {
+            self.error = String(describing: error)
+        }
+        refreshConversations()
+        await reloadThread()
+    }
+
+    public func dismissIdentityChange() {
+        identityPrompt = nil
     }
 
     public func select(_ id: String?) {
