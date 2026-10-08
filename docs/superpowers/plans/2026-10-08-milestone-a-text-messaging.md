@@ -90,7 +90,7 @@ signal-macos/
 - Produces:
   - `Vectors.load(_ name: String) throws -> [String: Any]` (harness only), used by every later task's tests.
   - Vector file contents (hex unless noted):
-    - `padding.json`: `{cases:[{plain, padded}]}` for lengths 0, 1, 158, 159, 160, 500.
+    - `padding.json`: `{cases:[{plain, padded}]}` for lengths 0, 1, 78, 79, 80, 158, 159, 160, 500.
     - `provisioning.json`: `{ourPrivateKey, envelope, expected:{aci, pni, aciIdentityPublic, aciIdentityPrivate, profileKey, provisioningCode}}`.
     - `envelopes.json`: one sealed-sender and one PREKEY_MESSAGE `Envelope` (complete proto bytes) addressed to a fixed recipient whose store state is in the file, plus the expected `Content` body and sent timestamp.
     - `access-key.json`: `{profileKey, accessKey}`.
@@ -187,7 +187,7 @@ signal-macos/
 
 - [ ] **Step 3: Generate the protos**
 
-  `gen-protos.sh` runs `protoc --swift_out=… --swift_opt=Visibility=Public` over `protos/SignalService.proto` and `protos/DeviceMessages.proto`. It requires `protoc-gen-swift` at the same version as the package dependency and fails loudly if they differ. Then implement `Padding`, porting `getPaddedMessageLength`/`padMessage` (block 160) and `#unpad` exactly. Replace `ContentCodec` and `ProtoFields` use in the message path with the generated types, and delete `ContentCodec.swift`.
+  `gen-protos.sh` runs `protoc --swift_out=… --swift_opt=Visibility=Public` over `protos/SignalService.proto` and `protos/DeviceMessages.proto`. It requires `protoc-gen-swift` at the same version as the package dependency and fails loudly if they differ. Then implement `Padding`, porting `getPaddedMessageLength`/`padMessage` (block 80, `PADDING_BLOCK` at `OutgoingMessage.preload.ts:123`) and `#unpad` exactly. Replace `ContentCodec` and `ProtoFields` use in the message path with the generated types, and delete `ContentCodec.swift`.
 
 - [ ] **Step 4: Run all the tests and make sure they pass**
 
@@ -382,7 +382,7 @@ signal-macos/
       // RecordingSubmitter replays scripted SubmitResults and records requests
       testSingleRequestAllDevices: recipient with sessions for devices 1,2,3 → exactly 1 submit with 3 messages
       testPlaintextIsPadded:       decrypt the recorded message for device 1 with the recipient store → bytes are
-                                   Padding.pad(content) (length % 160 == 0 after the 0x80 terminator rule)
+                                   Padding.pad(content) (length % 80 == 0 after the 0x80 terminator rule)
       test409Then410ThenSuccess:   scripted [.mismatched(missing:[4], extra:[2]), .stale([3]), .ok] → 3 submits; device 2 session
                                    archived; prekey fetched for 4 and 3 only; final request covers {1,3,4}
       testStaleOnlyRetriesOnce:    scripted [.stale([2]), .stale([2])] → exactly 2 submits, then throws
