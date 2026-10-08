@@ -14,6 +14,7 @@ let package = Package(
     dependencies: [
         .package(path: libsignalSwiftPath),
         .package(path: "../SignalCore"),
+        .package(path: "../SignalStorage"),
     ],
     targets: [
         .target(
@@ -21,6 +22,7 @@ let package = Package(
             dependencies: [
                 .product(name: "LibSignalClient", package: "swift"),
                 "SignalCore",
+                "SignalStorage",
             ]
         ),
     ]
