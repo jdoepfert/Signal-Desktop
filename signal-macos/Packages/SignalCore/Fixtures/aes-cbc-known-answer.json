@@ -1,0 +1,15 @@
+{
+  "key": "ea100e8cd4c61e269ef2d8f5bd4f4f46e08beeb4001e4000003fc1a08afec062",
+  "iv": "b514cdd74dea1cdecfe08cc3fbba9408",
+  "vectors": [
+    {
+      "plaintextUtf8": "provisioning-spike-1",
+      "ciphertextHex": "4e54247f93bfc1129517d187573f1a0ad5bdd039643ab855e2ffdf171005630e"
+    },
+    {
+      "plaintextUtf8": "0123456789abcdef0123456789ABCDEF",
+      "ciphertextHex": "bf05de264f8c142859ff6d3ed506c6b3d08355ed5e4834713e8741d4f05e129e3a582aefabc97d17770cbfdc9f0db967"
+    }
+  ],
+  "generatedBy": "openssl enc -aes-256-cbc (independent reference)"
+}

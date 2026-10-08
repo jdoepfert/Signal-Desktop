@@ -1,0 +1,91 @@
+// Copyright 2026 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+import Foundation
+import LibSignalClient
+
+public enum ProvisioningEvent: Sendable {
+    case address(String)
+    case envelope(Data)
+}
+
+/// Staging-only chat transport for provisioning. The host allowlist is
+/// enforced locally (offline-testable); TLS pinning itself is enforced by
+/// libsignal's Rust transport for the staging environment.
+public struct StagingTransport: Sendable {
+    public static let stagingHost = "chat.staging.signal.org"
+
+    private let host: String
+
+    public init(host: String) throws {
+        guard host == Self.stagingHost else {
+            throw ProvisioningError.untrustedHost
+        }
+        self.host = host
+    }
+
+    public func connect() async throws -> ProvisioningSession {
+        let net = Net(
+            env: .staging,
+            userAgent: "signal-macos-spike/0.0.0",
+            buildVariant: .production
+        )
+        let connection = try await net.connectProvisioning()
+        return ProvisioningSession(net: net, connection: connection)
+    }
+}
+
+final class ProvisioningSessionListener: ProvisioningConnectionListener {
+    private let continuation: AsyncStream<ProvisioningEvent>.Continuation
+
+    init(continuation: AsyncStream<ProvisioningEvent>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func provisioningConnection(
+        _ connection: ProvisioningConnection,
+        didReceiveAddress address: String,
+        sendAck: @escaping () throws -> Void
+    ) {
+        continuation.yield(.address(address))
+        try? sendAck()
+    }
+
+    func provisioningConnection(
+        _ connection: ProvisioningConnection,
+        didReceiveEnvelope envelope: Data,
+        sendAck: @escaping () throws -> Void
+    ) {
+        continuation.yield(.envelope(envelope))
+        try? sendAck()
+    }
+
+    func connectionWasInterrupted(_ service: ProvisioningConnection, error: Error?) {
+        continuation.finish()
+    }
+}
+
+/// A live provisioning session: start it, consume `events` for the address
+/// (show as QR) and the envelope (pass to `Provisioning.link`).
+public final class ProvisioningSession {
+    private let net: Net
+    private let connection: ProvisioningConnection
+    private let listener: ProvisioningSessionListener
+    public let events: AsyncStream<ProvisioningEvent>
+
+    init(net: Net, connection: ProvisioningConnection) {
+        var continuation: AsyncStream<ProvisioningEvent>.Continuation!
+        self.events = AsyncStream { continuation = $0 }
+        self.net = net
+        self.connection = connection
+        self.listener = ProvisioningSessionListener(continuation: continuation)
+    }
+
+    public func start() {
+        connection.start(listener: listener)
+    }
+
+    public func disconnect() async throws {
+        try await connection.disconnect()
+    }
+}

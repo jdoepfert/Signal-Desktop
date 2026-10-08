@@ -4,13 +4,25 @@
 import Foundation
 import SignalCore
 
-let filter = CommandLine.arguments.dropFirst().first
+let args = Array(CommandLine.arguments.dropFirst())
+let filter = args.first(where: { $0 != "link" })
 
 func run(_ name: String, _ body: () -> Void) {
     if let filter, !name.contains(filter) {
         return
     }
     body()
+}
+
+func runAsync(_ name: String, _ body: () async -> Void) async {
+    if let filter, !name.contains(filter) {
+        return
+    }
+    await body()
+}
+
+if args.first == "link" {
+    exit(await runLinkMode())
 }
 
 run("ScaffoldTests.testModuleLoads") {
@@ -23,6 +35,10 @@ run("ScaffoldTests.testModuleLoads") {
 
 run("LibsignalRoundTripTests") {
     runLibsignalRoundTripTests()
+}
+
+await runAsync("ProvisioningTests") {
+    await runProvisioningTests()
 }
 
 exit(checkResult())
