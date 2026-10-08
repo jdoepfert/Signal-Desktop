@@ -30,17 +30,23 @@ public enum DeviceRegistration {
         via service: any DeviceVerificationService,
         timeoutSeconds: Double = 300
     ) async throws -> RegisteredDevice {
-        guard !provisioningCode.isEmpty else {
+        let code = provisioningCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else {
             throw ProvisioningError.invalidCode
         }
         return try await withTimeout(seconds: timeoutSeconds) {
-            try await service.verifyProvisioningCode(provisioningCode, deviceName: deviceName)
+            try await service.verifyProvisioningCode(code, deviceName: deviceName)
         }
     }
 }
 
 /// Runs `operation` with a deadline. On expiry throws
 /// `ProvisioningError.timedOut` and cancels the operation.
+///
+/// Cooperative cancellation only: `withThrowingTaskGroup` waits for
+/// children on scope exit, so an operation that ignores cancellation still
+/// blocks past the deadline. Every real wait underneath this helper must
+/// be cancellation-aware (libsignal's async fns are; `Task.sleep` is).
 public func withTimeout<T: Sendable>(
     seconds: Double,
     operation: @escaping @Sendable () async throws -> T

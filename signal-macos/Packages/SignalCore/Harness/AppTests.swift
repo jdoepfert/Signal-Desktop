@@ -64,6 +64,33 @@ func runAppTests() async {
         check("AppTests.testUpdaterNewerVersion", false, "\(error)")
     }
 
+    // Newest wins regardless of item order (newest listed last here, so
+    // first-wins implementations fail).
+    do {
+        let feed = Data(
+            """
+            <?xml version="1.0" encoding="utf-8"?>
+            <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+              <channel><title>updates</title>
+                <item><title>1.5.0</title>
+                  <enclosure url="https://example.invalid/app1.zip"
+                    sparkle:version="1.5.0" length="1" type="application/octet-stream"/>
+                </item>
+                <item><title>2.0.0</title>
+                  <enclosure url="https://example.invalid/app2.zip"
+                    sparkle:version="2.0.0" length="1" type="application/octet-stream"/>
+                </item>
+              </channel>
+            </rss>
+            """.utf8
+        )
+        let prod = Updater(environment: .production)
+        let result = try prod.check(feed: feed, currentVersion: "1.0.0")
+        check("AppTests.testUpdaterNewestWins", result == .available(version: "2.0.0"))
+    } catch {
+        check("AppTests.testUpdaterNewestWins", false, "\(error)")
+    }
+
     // Clock skew beyond 5 minutes warns.
     do {
         let now = Date()

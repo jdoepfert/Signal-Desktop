@@ -8,7 +8,7 @@ two live-staging proofs still need a staging phone (see blockers).
 
 Spec: `docs/superpowers/specs/2026-10-07-native-swift-macos-design.md`.
 Plan: `docs/superpowers/plans/2026-10-07-native-swift-spike.md`.
-Verify: `cd signal-macos && swift run SpikeHarness` (14/14 checks pass).
+Verify: `cd signal-macos && swift run SpikeHarness` (46/46 checks pass).
 
 ## Evidence
 
@@ -99,8 +99,10 @@ Verify: `cd signal-macos && swift run SpikeHarness` (14/14 checks pass).
 
 # Phase 1 exit verdict (Foundation)
 
-**Status: COMPLETE pending live-link confirmation.** All automatable work
-is done and green (36/36 harness checks, strict-concurrency clean).
+**Status: CONDITIONAL COMPLETE.** All automatable work is done and green
+(46/46 harness checks, strict-concurrency clean), but two gate items need
+a phone and the live-link confirmation is still open — matching the
+Phase 0 precedent, no full GO is claimed until they close.
 
 ## Exit gate
 
@@ -116,16 +118,23 @@ is done and green (36/36 harness checks, strict-concurrency clean).
 
 ## Review Focus replay
 
-- SQLCipher key loss → pinned (`testWrongKey`: throws, file byte-identical).
-  Recovery UX ("needs re-link") is a Phase 2 UI task.
-- Migration failure → pinned (`testCorruptFile`: throws, file untouched).
-- Provisioning deadlines → pinned (`testTimeout` + `withTimeout` on every
-  network wait).
-- Clock skew → pinned (`testClockSkew`: 10 min warns, 1 min silent;
-  warning surfaces in `OnboardingWindow`).
-- Concurrent store writes → pinned (`testConcurrentWriters`: 100 parallel
-  saves lose nothing).
-- Nothing unpinned. Phase 2 tasks carried over: key-loss recovery UX,
-  log file sink, real send path (authenticated chat + device list),
-  XCTest port, upstream RingRTC macOS cfg, reference-generated
-  provisioning fixtures.
+- SQLCipher key loss → pinned (`testWrongKey`: throws, file byte-identical;
+  `mapDatabaseOpenError` maps it to `.needsReLink`). Recovery UX is a
+  Phase 2 UI task.
+- Migration failure → pinned (`testCorruptFile` + `testMigrationAtomicity`:
+  failed migrations roll back, v1 data intact, fixed retry succeeds).
+- Provisioning deadlines → pinned (`testTimeout` + `withTimeout` on
+  verification and link-session waits; LinkMode surfaces re-scan on
+  expiry).
+- Clock skew → detection pinned (`testClockSkew`: 10 min warns, 1 min
+  silent; `OnboardingWindow` accepts the flag). Live server-time wiring
+  is a Phase 2 task.
+- Concurrent store writes → pinned (`testConcurrentWriters`,
+  `testSameMessageConcurrent`, `testSameKeyConcurrent`,
+  `testIdentityConcurrent`).
+- Phase 2 tasks carried over, blocking entry in order: **(1) own GRDB
+  fork** (an unknown third party currently sits between credentials and
+  disk — replace before any real account touches this code); (2) key-loss
+  recovery UX; (3) log file sink; (4) real send path (authenticated chat
+  + device list); (5) XCTest port; (6) upstream RingRTC macOS cfg;
+  (7) reference-generated provisioning fixtures.

@@ -50,31 +50,31 @@ public final class GRDBIdentityStore: IdentityKeyStore, Sendable {
         for address: ProtocolAddress,
         context: StoreContext
     ) throws -> IdentityChange {
-        let key = Self.addressKey(address)
-        let old: IdentityKey? = try {
-            guard
-                let row: Data = try queue.read({ db in
-                    try Data.fetchOne(
+        // Single write transaction: the read and the upsert must be atomic
+        // or concurrent saves can both observe the same "old" key and
+        // misreport the TOFU change signal.
+        try queue.write { db in
+            let old: IdentityKey? = try {
+                guard
+                    let row: Data = try Data.fetchOne(
                         db,
                         sql: "SELECT public_key FROM identities WHERE address = ?",
-                        arguments: [key]
+                        arguments: [Self.addressKey(address)]
                     )
-                })
-            else {
-                return nil
-            }
-            return try IdentityKey(bytes: row)
-        }()
-        try queue.write { db in
+                else {
+                    return nil
+                }
+                return try IdentityKey(bytes: row)
+            }()
             try db.execute(
                 sql: "INSERT OR REPLACE INTO identities (address, public_key) VALUES (?, ?)",
-                arguments: [key, identity.serialize()]
+                arguments: [Self.addressKey(address), identity.serialize()]
             )
-        }
-        if old == nil || old == identity {
-            return .newOrUnchanged
-        } else {
-            return .replacedExisting
+            if old == nil || old == identity {
+                return .newOrUnchanged
+            } else {
+                return .replacedExisting
+            }
         }
     }
 

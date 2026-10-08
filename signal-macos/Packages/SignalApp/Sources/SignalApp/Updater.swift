@@ -73,10 +73,17 @@ private final class AppcastParser: NSObject, XMLParserDelegate {
         qualifiedName qName: String?,
         attributes attributeDict: [String: String] = [:]
     ) {
-        guard elementName == "enclosure", latest == nil else {
+        guard elementName == "enclosure" else {
             return
         }
-        if let version = attributeDict["sparkle:version"] ?? attributeDict["version"] {
+        guard let version = attributeDict["sparkle:version"] ?? attributeDict["version"] else {
+            return
+        }
+        if let current = latest {
+            if Updater.compareVersions(version, current) > 0 {
+                latest = version
+            }
+        } else {
             latest = version
         }
     }

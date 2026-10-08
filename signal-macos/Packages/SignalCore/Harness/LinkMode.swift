@@ -14,37 +14,47 @@ import SignalCore
 // server-assigned during code verification (Phase 1), so no credentials
 // are minted here. Nothing is stored or sent.
 func runLinkMode() async -> Int32 {
-    let production = CommandLine.arguments.contains("--production")
-    let host = production
-        ? ChatTransport.productionHost
-        : ChatTransport.stagingHost
     do {
-        let transport = try ChatTransport(host: host)
-        let ours = PrivateKey.generate()
-        let session = try await transport.connect()
-        session.start()
-        print("Waiting for provisioning address...")
-        for await event in session.events {
-            switch event {
-            case .address(let address):
-                print("ADDRESS \(address)")
-                print("Scan the QR for this address, then approve on the primary device.")
-            case .envelope(let envelope):
-                let privateBytes = ours.serialize()
-                let aci = try Provisioning.decryptEnvelope(
-                    envelope,
-                    ourPrivateKeyBytes: privateBytes
-                )
-                print("LINKED aci=\(aci)")
-                try? await session.disconnect()
-                return 0
-            }
+        return try await withTimeout(seconds: 600) {
+            try await runLinkSession()
         }
-        print("Session closed before an envelope arrived.")
-        print("Addresses expire within minutes — re-run for a fresh one, then re-scan.")
+    } catch let error as ProvisioningError where error == .timedOut {
+        print("Timed out waiting — addresses expire within minutes.")
+        print("Re-run for a fresh address, then re-scan.")
         return 1
     } catch {
         print("link failed: \(error)")
         return 1
     }
+}
+
+private func runLinkSession() async throws -> Int32 {
+    let production = CommandLine.arguments.contains("--production")
+    let host = production
+        ? ChatTransport.productionHost
+        : ChatTransport.stagingHost
+    let transport = try ChatTransport(host: host)
+    let ours = PrivateKey.generate()
+    let session = try await transport.connect()
+    session.start()
+    print("Waiting for provisioning address...")
+    for await event in session.events {
+        switch event {
+        case .address(let address):
+            print("ADDRESS \(address)")
+            print("Scan the QR for this address, then approve on the primary device.")
+        case .envelope(let envelope):
+            let privateBytes = ours.serialize()
+            let aci = try Provisioning.decryptEnvelope(
+                envelope,
+                ourPrivateKeyBytes: privateBytes
+            )
+            print("LINKED aci=\(aci)")
+            try? await session.disconnect()
+            return 0
+        }
+    }
+    print("Session closed before an envelope arrived.")
+    print("Addresses expire within minutes — re-run for a fresh one, then re-scan.")
+    return 1
 }

@@ -62,6 +62,10 @@ run("LoggingTests") {
 await runAsync("StorageTests") {
     await runStorageTests()
     await runStoreTests()
+    runOpenErrorMappingTests()
+    runMigrationAtomicityTests()
+    await runIdentityTests()
+    await runSameKeyConcurrencyTests()
 }
 
 await runAsync("RegistrationTests") {

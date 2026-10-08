@@ -24,6 +24,12 @@ let package = Package(
         .package(path: "Packages/SignalCallsSpike"),
         .package(path: "Packages/SignalApp"),
         .package(path: "Packages/SignalStorage"),
+        // Test-only: the harness exercises migrator atomicity directly.
+        // Version owned by SignalStorage/Package.swift; keep in sync.
+        .package(
+            url: "https://github.com/Kizotis/grdb-sqlcipher.git",
+            revision: "fa02b419f8b112b57709fc9b9fdeb4a565d68865"
+        ),
     ],
     targets: [
         .target(
@@ -43,6 +49,7 @@ let package = Package(
                 .product(name: "SignalCallsSpike", package: "SignalCallsSpike"),
                 "SignalApp",
                 "SignalStorage",
+                .product(name: "GRDB", package: "grdb-sqlcipher"),
             ],
             path: "Packages/SignalCore/Harness",
             linkerSettings: [
