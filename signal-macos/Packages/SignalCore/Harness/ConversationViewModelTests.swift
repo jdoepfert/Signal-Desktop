@@ -1,6 +1,8 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+// macOS-only: depends on SignalApp / SignalCallsSpike (see CI-LANE.md).
+#if os(macOS)
 import Foundation
 import SignalApp
 import SignalStorage
@@ -64,3 +66,4 @@ func runConversationViewModelTests() async {
         )
     }
 }
+#endif

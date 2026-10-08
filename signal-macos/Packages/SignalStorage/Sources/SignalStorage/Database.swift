@@ -18,9 +18,16 @@ public struct SignalDatabase: Sendable {
     ///   access with "file is not a database".
     public static func open(path: String?, key: String) throws -> SignalDatabase {
         var configuration = Configuration()
+        #if os(Linux)
+        // Linux verification lane only: GRDB over system SQLite has no
+        // codec, so the key is ignored and the file is NOT encrypted (see
+        // signal-macos/CI-LANE.md). Production (macOS) always keys SQLCipher.
+        _ = key
+        #else
         configuration.prepareDatabase { db in
             try db.usePassphrase(key)
         }
+        #endif
         do {
             let queue = try DatabaseQueue(path: path ?? ":memory:", configuration: configuration)
             try MigrationChain.migrator().migrate(queue)

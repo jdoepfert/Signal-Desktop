@@ -1,7 +1,11 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 import LibSignalClient
 
@@ -317,8 +321,6 @@ extension Provisioning {
     }
 
     private static func randomPassword() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
+        Data(SecureRandom.bytes(32)).base64EncodedString()
     }
 }

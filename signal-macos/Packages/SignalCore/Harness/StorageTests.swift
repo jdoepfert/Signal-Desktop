@@ -56,7 +56,9 @@ func runStorageTests() async {
         check("StorageTests.testCorruptFile", false, "\(error)")
     }
 
-    // Wrong key: throws, file untouched.
+    // Wrong key: throws, file untouched. SQLCipher-only (macOS): the Linux
+    // lane's system SQLite ignores the key.
+    #if os(macOS)
     do {
         let path = tempDBPath()
         do {
@@ -75,10 +77,12 @@ func runStorageTests() async {
     } catch {
         check("StorageTests.testWrongKey", false, "\(error)")
     }
+    #endif
 }
 
 func runOpenErrorMappingTests() {
-    // Wrong key maps to needsReLink (SQLITE_NOTADB).
+    // Wrong key maps to needsReLink (SQLITE_NOTADB). SQLCipher-only (macOS).
+    #if os(macOS)
     do {
         let path = tempDBPath()
         _ = try SignalDatabase.open(path: path, key: "correct-key")
@@ -96,6 +100,7 @@ func runOpenErrorMappingTests() {
     } catch {
         check("StorageTests.testOpenErrorMapping", false, "\(error)")
     }
+    #endif
 
     // Unopenable path maps to corruptStore, never needsReLink.
     do {

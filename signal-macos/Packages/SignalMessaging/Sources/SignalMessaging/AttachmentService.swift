@@ -1,10 +1,14 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 import LibSignalClient
-import Security
+import SignalCore
 import SignalStorage
 
 public struct AttachmentPointer: Sendable, Equatable {
@@ -25,7 +29,6 @@ public enum AttachmentError: Error, Equatable {
     case oversize
     case digestMismatch
     case unknownKey
-    case randomFailed
 }
 
 /// CDN seam: upload-form issuance + blob PUT/GET. The real implementation
@@ -58,13 +61,8 @@ public final class AttachmentService: Sendable {
         guard UInt64(bytes.count) <= Self.maxBytes else {
             throw AttachmentError.oversize
         }
-        var keyBytes = [UInt8](repeating: 0, count: 32)
-        var nonceBytes = [UInt8](repeating: 0, count: 12)
-        guard SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes) == errSecSuccess,
-              SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes) == errSecSuccess
-        else {
-            throw AttachmentError.randomFailed
-        }
+        let keyBytes = SecureRandom.bytes(32)
+        let nonceBytes = SecureRandom.bytes(12)
         var ciphertext = bytes
         let encryption = try Aes256GcmEncryption(
             key: keyBytes,

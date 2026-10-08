@@ -14,6 +14,32 @@ let ffiLibDir = thirdParty + "/libsignal/target/debug"
 let ringrtcLibDir = thirdParty + "/ringrtc/target/debug"
 let webrtcLibDir = thirdParty + "/ringrtc-webrtc/release/obj"
 
+// Linux verification lane only (see CI-LANE.md): GRDB and CryptoKit swaps
+// mirror Packages/SignalStorage and Packages/SignalCore manifests; macOS
+// resolves exactly what it did before. SignalApp, SignalCallsSpike (RingRTC)
+// and SignalMac stay macOS-only.
+#if os(Linux)
+let grdbDependency: Package.Dependency = .package(
+    url: "https://github.com/groue/GRDB.swift.git",
+    exact: "7.11.1"
+)
+let grdbPackage = "GRDB.swift"
+let cryptoPackages: [Package.Dependency] = [
+    .package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.2"),
+]
+let cryptoProducts: [Target.Dependency] = [
+    .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
+]
+#else
+let grdbDependency: Package.Dependency = .package(
+    url: "https://github.com/Kizotis/grdb-sqlcipher.git",
+    revision: "fa02b419f8b112b57709fc9b9fdeb4a565d68865"
+)
+let grdbPackage = "grdb-sqlcipher"
+let cryptoPackages: [Package.Dependency] = []
+let cryptoProducts: [Target.Dependency] = []
+#endif
+
 let package = Package(
     name: "signal-macos",
     platforms: [.macOS(.v13)],
@@ -25,34 +51,40 @@ let package = Package(
         .package(path: "Packages/SignalStorage"),
         // Test-only: the harness exercises migrator atomicity directly.
         // Version owned by SignalStorage/Package.swift; keep in sync.
-        .package(
-            url: "https://github.com/Kizotis/grdb-sqlcipher.git",
-            revision: "fa02b419f8b112b57709fc9b9fdeb4a565d68865"
-        ),
+        grdbDependency,
         .package(path: "Packages/SignalMessaging"),
         .package(path: "Packages/SignalLogging"),
-    ],
+    ] + cryptoPackages,
     targets: [
         .executableTarget(
             name: "SpikeHarness",
             dependencies: [
                 .product(name: "SignalCore", package: "SignalCore"),
                 .product(name: "LibSignalClient", package: "swift"),
-                .product(name: "SignalCallsSpike", package: "SignalCallsSpike"),
-                "SignalApp",
+                .product(
+                    name: "SignalCallsSpike",
+                    package: "SignalCallsSpike",
+                    condition: .when(platforms: [.macOS])
+                ),
+                .product(
+                    name: "SignalApp",
+                    package: "SignalApp",
+                    condition: .when(platforms: [.macOS])
+                ),
                 "SignalStorage",
-                .product(name: "GRDB", package: "grdb-sqlcipher"),
+                .product(name: "GRDB", package: grdbPackage),
                 "SignalMessaging",
                 "SignalLogging",
-            ],
+            ] + cryptoProducts,
             path: "Packages/SignalCore/Harness",
             linkerSettings: [
-                .linkedLibrary("c++"),
-                .unsafeFlags([
-                    "-L\(ffiLibDir)",
-                    "-L\(ringrtcLibDir)",
-                    "-L\(webrtcLibDir)",
-                ]),
+                // libsignal's own manifest links stdc++ on Linux.
+                .linkedLibrary("c++", .when(platforms: [.macOS])),
+                .unsafeFlags(["-L\(ffiLibDir)"]),
+                .unsafeFlags(
+                    ["-L\(ringrtcLibDir)", "-L\(webrtcLibDir)"],
+                    .when(platforms: [.macOS])
+                ),
             ]
         ),
         .executableTarget(

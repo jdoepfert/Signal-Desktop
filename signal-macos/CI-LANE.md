@@ -43,3 +43,48 @@ manifests stay consistent as long as all three live side by side).
 The AES known-answer fixture
 (`Packages/SignalCore/Fixtures/aes-cbc-known-answer.json`) was
 generated with `openssl enc -aes-256-cbc` and is independent of `AesCbc`.
+
+## Linux lane
+
+A verification lane for the non-UI packages (SignalCore, SignalStorage,
+SignalMessaging, SignalLogging) on Linux x86_64. macOS stays the
+authority; the Linux lane never changes what macOS builds.
+
+Prerequisites: Swift 6.3.3 (the script uses `/opt/swift/usr/bin` when
+present), `libsqlite3-dev`, and `libsignal_ffi.a` from
+`Tools/build-ffi.sh` (needs `cargo`, `protoc`).
+
+```sh
+signal-macos/Tools/linux-lane.sh            # strict-concurrency build + all checks
+signal-macos/Tools/linux-lane.sh StorageTests   # subset (filter substring)
+```
+
+It exits with the harness status. Expected warnings: none in files under
+`Packages/` (libsignal's own `NiceBridgingUtils.swift` emits one
+`utf8String` deprecation on Linux).
+
+How it differs from macOS (all switched on the host OS in the manifests,
+so macOS resolves exactly the macOS graph):
+
+- GRDB comes from upstream `groue/GRDB.swift` 7.11.1 (the fork's base
+  commit) over **unencrypted system SQLite**: SQLCipher.swift is an
+  Apple-only xcframework. `SignalDatabase.open` ignores the key on Linux.
+  Production (macOS) always keys SQLCipher.
+- CryptoKit is replaced by `apple/swift-crypto` 4.5.2 (same API).
+- The resolved graph differs, so the script restores the macOS-owned
+  `Package.resolved` on exit. Do not commit a Linux-resolved file.
+- `SignalApp`, `SignalCallsSpike` (RingRTC) and `SignalMac` are not built.
+
+macOS-only checks (compiled out on Linux):
+
+- SQLCipher: `StorageTests.testWrongKey`, `StorageTests.testOpenErrorMapping`
+- RingRTC: `RingRTCTests.testRingRTCInitializesWithoutMediaDevice`
+- SignalApp (and ringrtc pins): `EnvironmentTests.testPinVersionsFormat`,
+  `EnvironmentTests.testResolve`, `EnvironmentTests.testResolveUnknown`,
+  `AppTests.testBootstrapOrder`, `AppTests.testClockSkew`,
+  `AppTests.testUpdaterEmptyFeed`, `AppTests.testUpdaterNewerVersion`,
+  `AppTests.testUpdaterNewestWins`, `MessagingTests.testThreadOrdering`,
+  `MessagingTests.testThreadPagination`, `MessagingTests.testKeychainRoundTrip`,
+  `MessagingTests.testNotificationAlert`, `MessagingTests.testNotificationMuted`,
+  `MessagingTests.testNotificationGlobalOff`, `MessagingTests.testNotificationLocked`,
+  `MessagingTests.testMuteBadge`

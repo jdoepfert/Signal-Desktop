@@ -4,6 +4,9 @@
 import Foundation
 import SignalCore
 
+// Checks under `#if os(macOS)` need SignalApp, RingRTC or SQLCipher; the
+// Linux verification lane compiles them out (list in CI-LANE.md).
+
 let args = Array(CommandLine.arguments.dropFirst())
 let filter = args.first(where: { $0 != "link" })
 
@@ -42,19 +45,23 @@ await runAsync("ProvisioningTests") {
     runProvisioningCodeTests()
 }
 
+#if os(macOS)
 run("RingRTCTests") {
     runRingRTCInitTests()
 }
+#endif
 
 await runAsync("MessagePipeTests") {
     await runMessagePipeTests()
     await runPersistedReceiveTests()
 }
 
+#if os(macOS)
 run("EnvironmentTests") {
     runPinVersionsFormatTests()
     runBootstrapTests()
 }
+#endif
 
 run("LoggingTests") {
     runLoggingTests()
@@ -73,9 +80,11 @@ await runAsync("RegistrationTests") {
     await runRegistrationTests()
 }
 
+#if os(macOS)
 await runAsync("AppTests") {
     await runAppTests()
 }
+#endif
 
 await runAsync("MessagingTests") {
     await runChatSessionTests()
@@ -85,12 +94,16 @@ await runAsync("MessagingTests") {
     await runGroupTests()
     await runAttachmentTests()
     await runLiveTransportTests()
+    #if os(macOS)
     await runConversationViewModelTests()
     runKeychainTests()
+    #endif
     await runLinkedRegistrationTests()
     await runSearchTests()
     await runLinkPreviewTests()
+    #if os(macOS)
     runNotificationTests()
+    #endif
     await runStandaloneRegistrationTests()
 }
 

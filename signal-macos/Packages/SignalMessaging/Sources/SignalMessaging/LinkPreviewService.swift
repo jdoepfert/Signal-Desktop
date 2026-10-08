@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import SignalCore
 
 public struct LinkPreview: Sendable, Equatable {

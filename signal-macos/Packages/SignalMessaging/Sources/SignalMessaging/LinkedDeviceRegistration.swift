@@ -3,14 +3,12 @@
 
 import Foundation
 import LibSignalClient
-import Security
 import SignalCore
 import SignalStorage
 
 public enum LinkRegistrationError: Error, Equatable {
     case rejected(status: UInt16)
     case invalidResponse
-    case randomFailed
 }
 
 /// Transport seam for the link-device call: PUT with a JSON body, Basic
@@ -93,12 +91,7 @@ public struct LinkedDeviceRegistration: Sendable {
         let context = NullContext()
         let identity = try store.identityKeyPair(context: context)
         let registrationId = try store.localRegistrationId(context: context)
-        var passwordBytes = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, passwordBytes.count, &passwordBytes) == errSecSuccess
-        else {
-            throw LinkRegistrationError.randomFailed
-        }
-        let password = Data(passwordBytes).base64EncodedString()
+        let password = Data(SecureRandom.bytes(32)).base64EncodedString()
 
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         let signedKey = PrivateKey.generate()

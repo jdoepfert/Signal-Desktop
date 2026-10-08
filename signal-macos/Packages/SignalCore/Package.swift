@@ -14,6 +14,20 @@ import PackageDescription
 let thirdParty = "../../../.superpowers/sdd/2026-10-07-native-swift-spike/third-party"
 let libsignalSwiftPath = thirdParty + "/libsignal/swift"
 
+// Linux verification lane only: CryptoKit is Apple-only, so Linux hosts use
+// apple/swift-crypto (same API). macOS never resolves it.
+#if os(Linux)
+let cryptoPackages: [Package.Dependency] = [
+    .package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.2"),
+]
+let cryptoProducts: [Target.Dependency] = [
+    .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
+]
+#else
+let cryptoPackages: [Package.Dependency] = []
+let cryptoProducts: [Target.Dependency] = []
+#endif
+
 let package = Package(
     name: "SignalCore",
     platforms: [.macOS(.v13)],
@@ -24,7 +38,7 @@ let package = Package(
         .package(path: "../SignalApp"),
         .package(path: "../SignalStorage"),
         .package(path: "../SignalLogging"),
-    ],
+    ] + cryptoPackages,
     targets: [
         // NOTE: no linkerSettings here. Static-library targets are
         // archived, not linked; `-L` search dirs belong on the final
@@ -36,7 +50,7 @@ let package = Package(
                 .product(name: "LibSignalClient", package: "swift"),
                 "SignalStorage",
                 "SignalLogging",
-            ]
+            ] + cryptoProducts
         ),
     ]
 )
