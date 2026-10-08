@@ -68,4 +68,8 @@ await runAsync("RegistrationTests") {
     await runRegistrationTests()
 }
 
+await runAsync("AppTests") {
+    await runAppTests()
+}
+
 exit(checkResult())

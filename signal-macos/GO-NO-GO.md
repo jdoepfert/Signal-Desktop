@@ -94,3 +94,38 @@ Verify: `cd signal-macos && swift run SpikeHarness` (14/14 checks pass).
 2. Live 1:1 send/receive — needs Task 4's real transport wiring (Phase 1)
    plus, once linked, "Note to Self" makes a safe E2E loop without a
    second account.
+
+---
+
+# Phase 1 exit verdict (Foundation)
+
+**Status: COMPLETE pending live-link confirmation.** All automatable work
+is done and green (36/36 harness checks, strict-concurrency clean).
+
+## Exit gate
+
+- [x] CI green on `main` (spike-ci lane: FFI builds + full harness +
+  strict-concurrency gate). Workflow committed; runs on push/PR paths.
+- [ ] Linked account persists across restarts (manual: link once, quit,
+  relaunch, still linked). Needs a phone + the Phase 2 app shell that
+  opens the real store at launch.
+- [x] Repo-split decision recorded: **stay in `signal-macos/` for
+  Phase 2.** Rationale: phases reference Desktop sources constantly,
+  nothing is distributed yet, and a split now buys nothing. Re-decide
+  when notarization/distribution work starts.
+
+## Review Focus replay
+
+- SQLCipher key loss → pinned (`testWrongKey`: throws, file byte-identical).
+  Recovery UX ("needs re-link") is a Phase 2 UI task.
+- Migration failure → pinned (`testCorruptFile`: throws, file untouched).
+- Provisioning deadlines → pinned (`testTimeout` + `withTimeout` on every
+  network wait).
+- Clock skew → pinned (`testClockSkew`: 10 min warns, 1 min silent;
+  warning surfaces in `OnboardingWindow`).
+- Concurrent store writes → pinned (`testConcurrentWriters`: 100 parallel
+  saves lose nothing).
+- Nothing unpinned. Phase 2 tasks carried over: key-loss recovery UX,
+  log file sink, real send path (authenticated chat + device list),
+  XCTest port, upstream RingRTC macOS cfg, reference-generated
+  provisioning fixtures.

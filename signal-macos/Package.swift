@@ -54,5 +54,10 @@ let package = Package(
                 ]),
             ]
         ),
+        .executableTarget(
+            name: "SignalMac",
+            dependencies: ["SignalApp"],
+            path: "Apps/SignalMac"
+        ),
     ]
 )
