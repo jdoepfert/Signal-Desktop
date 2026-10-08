@@ -176,7 +176,7 @@ func runProvisioningTests() async {
     }
 
     do {
-        _ = try StagingTransport(host: "evil.example")
+        _ = try ChatTransport(host: "evil.example")
         check("ProvisioningTests.testStagingHostPinned", false, "no error thrown")
     } catch let error as ProvisioningError {
         // Asserts the specific rejection: the offline allowlist is the only
@@ -191,8 +191,12 @@ func runProvisioningTests() async {
         check("ProvisioningTests.testStagingHostPinned", false, "\(error)")
     }
     do {
-        _ = try StagingTransport(host: "chat.staging.signal.org")
-        check("ProvisioningTests.testStagingHostPinnedStaging", true)
+        let staging = try ChatTransport(host: "chat.staging.signal.org")
+        let production = try ChatTransport(host: "chat.signal.org")
+        check(
+            "ProvisioningTests.testStagingHostPinnedStaging",
+            staging.environment == .staging && production.environment == .production
+        )
     } catch {
         check("ProvisioningTests.testStagingHostPinnedStaging", false, "\(error)")
     }

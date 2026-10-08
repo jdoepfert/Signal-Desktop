@@ -29,8 +29,8 @@ public enum ProvisioningError: Error, Equatable {
     /// session. Thrown promptly — never a hang. Real address expiry is
     /// server-side; the client observes it as a session timeout.
     case envelopeExpired
-    /// Non-staging host passed to StagingTransport. TLS pinning itself is
-    /// enforced by libsignal's Rust transport for the staging environment.
+    /// Non-staging, non-production host passed to ChatTransport. TLS pinning
+    /// itself is enforced by libsignal's Rust transport.
     case untrustedHost
 }
 

@@ -9,16 +9,26 @@ public enum ProvisioningEvent: Sendable {
     case envelope(Data)
 }
 
-/// Staging-only chat transport for provisioning. The host allowlist is
-/// enforced locally (offline-testable); TLS pinning itself is enforced by
-/// libsignal's Rust transport for the staging environment.
-public struct StagingTransport: Sendable {
+/// Chat transport for provisioning. Staging is the default environment;
+/// production exists so the spike can link as a secondary device with a
+/// normal Signal phone (up to 5 linked devices per account — no second
+/// phone or number needed). The host allowlist is enforced locally
+/// (offline-testable); TLS pinning itself is enforced by libsignal's Rust
+/// transport for the selected environment.
+public struct ChatTransport: Sendable {
     public static let stagingHost = "chat.staging.signal.org"
+    public static let productionHost = "chat.signal.org"
 
+    public let environment: Net.Environment
     private let host: String
 
     public init(host: String) throws {
-        guard host == Self.stagingHost else {
+        switch host {
+        case Self.stagingHost:
+            self.environment = .staging
+        case Self.productionHost:
+            self.environment = .production
+        default:
             throw ProvisioningError.untrustedHost
         }
         self.host = host
@@ -26,11 +36,11 @@ public struct StagingTransport: Sendable {
 
     public func connect() async throws -> ProvisioningSession {
         let net = Net(
-            env: .staging,
+            env: environment,
             userAgent: "signal-macos-spike/0.0.0",
-            // Unverified guess: base remote-config keys against staging.
-            // Confirm against a live staging link in Phase 1; if the link
-            // fails, this variant is the first suspect.
+            // Unverified guess: base remote-config keys. Confirm against a
+            // live link in Phase 1; if the link fails, this variant is the
+            // first suspect.
             buildVariant: .production
         )
         let connection = try await net.connectProvisioning()

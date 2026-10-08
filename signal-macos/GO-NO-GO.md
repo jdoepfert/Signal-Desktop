@@ -30,10 +30,12 @@ Verify: `cd signal-macos && swift run SpikeHarness` (14/14 checks pass).
   (ECDH + HKDF + HMAC + AES-256-CBC + proto hand-parse).
   `testEnvelopeExpirySurfaced` proves stale-key envelopes fail fast.
   `testStagingHostPinned` proves non-staging hosts are rejected offline.
-- Implemented but not run live: `StagingTransport` (`Net` staging env +
+- Implemented but not run live: `ChatTransport` (`Net` staging env +
   `ProvisioningConnection` + address/envelope event stream) and the
-  `SpikeHarness link` CLI. Needs a staging-registered phone to scan the
-  address. See blockers.
+  `SpikeHarness link` CLI. Link with a normal phone via
+  `SpikeHarness link --production` (secondary device on the production
+  account — no second phone needed); staging links still need a
+  staging-registered app. See blockers.
 
 ### (c) 1:1 text both directions — OFFLINE PROVEN, live pending
 
@@ -83,8 +85,10 @@ Verify: `cd signal-macos && swift run SpikeHarness` (14/14 checks pass).
 
 ## Blockers for full GO
 
-1. Live staging link (`SpikeHarness link` + QR scan) — needs a
-   staging-registered phone. Offline decrypt proven; transport code
-   written but unrun.
-2. Live 1:1 send/receive on staging — needs Task 4 plus two staging
-   accounts.
+1. Live link (`SpikeHarness link` + QR scan) — link as a secondary device
+   with a normal phone (`--production`) or a staging-registered app
+   (staging). Safe: the spike only decrypts the envelope and prints the
+   ACI — nothing is stored or sent, and the device can be unlinked after.
+2. Live 1:1 send/receive — needs Task 4's real transport wiring (Phase 1)
+   plus, once linked, "Note to Self" makes a safe E2E loop without a
+   second account.

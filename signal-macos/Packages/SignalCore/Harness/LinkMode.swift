@@ -5,14 +5,21 @@ import Foundation
 import LibSignalClient
 import SignalCore
 
-// Manual provisioning run (not CI): `swift run SpikeHarness link`.
-// Opens a staging provisioning session, prints the address to scan with a
-// staging-registered Signal app, then decrypts the envelope and prints the
-// ACI. The device id is server-assigned during code verification (Phase 1),
-// so no credentials are minted here.
+// Manual provisioning run (not CI): `swift run SpikeHarness link` for
+// staging, `swift run SpikeHarness link --production` to link as a
+// secondary device with a normal Signal phone (up to 5 linked devices per
+// account — no second phone or number needed).
+// Opens a provisioning session, prints the address to scan with the phone,
+// then decrypts the envelope and prints the ACI. The device id is
+// server-assigned during code verification (Phase 1), so no credentials
+// are minted here. Nothing is stored or sent.
 func runLinkMode() async -> Int32 {
+    let production = CommandLine.arguments.contains("--production")
+    let host = production
+        ? ChatTransport.productionHost
+        : ChatTransport.stagingHost
     do {
-        let transport = try StagingTransport(host: StagingTransport.stagingHost)
+        let transport = try ChatTransport(host: host)
         let ours = PrivateKey.generate()
         let session = try await transport.connect()
         session.start()
