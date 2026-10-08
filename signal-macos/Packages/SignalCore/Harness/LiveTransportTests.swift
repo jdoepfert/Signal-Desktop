@@ -138,7 +138,7 @@ func runLiveTransportTests() async {
             certs: certs,
             store: aliceStore,
             ourAddress: aliceAddress,
-            trustRoot: trustKeys.publicKey,
+            trustRoots: [trustKeys.publicKey],
             devicesForRecipient: { aci in
                 try await sessions.ensureAllSessions(with: aci)
             }

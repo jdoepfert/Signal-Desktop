@@ -73,19 +73,32 @@ public final class ConversationViewModel: ObservableObject {
         muted ? 0 : unreadCount
     }
 
-    /// Replaces content with the newest page, chronological.
-    public func loadLatest(limit: Int, from store: MessageStore) async throws {
-        let page = try store.page(limit: limit)
+    /// Replaces content with the newest page in the conversation,
+    /// chronological.
+    public func loadLatest(
+        in conversationId: String,
+        limit: Int,
+        from store: MessageStore
+    ) async throws {
+        let page = try store.page(in: conversationId, limit: limit)
         messages = page.map(ThreadMessage.init).sorted()
     }
 
     /// Prepends the next older page; empty threads load latest instead.
-    public func loadOlder(limit: Int, from store: MessageStore) async throws {
+    public func loadOlder(
+        in conversationId: String,
+        limit: Int,
+        from store: MessageStore
+    ) async throws {
         guard let oldest = messages.first else {
-            try await loadLatest(limit: limit, from: store)
+            try await loadLatest(in: conversationId, limit: limit, from: store)
             return
         }
-        let page = try store.page(limit: limit, beforeRowId: oldest.rowId)
+        let page = try store.page(
+            in: conversationId,
+            limit: limit,
+            beforeRowId: oldest.rowId
+        )
         messages = page.map(ThreadMessage.init).sorted() + messages
     }
 

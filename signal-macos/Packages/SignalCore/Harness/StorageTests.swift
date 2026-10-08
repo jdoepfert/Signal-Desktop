@@ -18,7 +18,7 @@ func runStorageTests() async {
         let back = try await db.keyValue.get("k")
         check(
             "StorageTests.testMemoryRoundTrip",
-            back == Data("value".utf8) && MigrationChain.currentVersion == 4
+            back == Data("value".utf8) && MigrationChain.currentVersion == 5
         )
     } catch {
         check("StorageTests.testMemoryRoundTrip", false, "\(error)")

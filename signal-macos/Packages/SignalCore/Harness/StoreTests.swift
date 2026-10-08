@@ -171,6 +171,21 @@ func runSameKeyConcurrencyTests() async {
         check("StorageTests.testSameMessageConcurrent", false, "\(error)")
     }
 
+    // Distinct envelopes sharing a millisecond stay distinct.
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let messages = MessageStore(queue: db.queue)
+        let first = try messages.save(senderAci: "a", body: "x", timestamp: 1, envelopeHash: Data([1]))
+        let second = try messages.save(senderAci: "a", body: "y", timestamp: 1, envelopeHash: Data([2]))
+        let again = try messages.save(senderAci: "a", body: "x", timestamp: 1, envelopeHash: Data([1]))
+        check(
+            "StorageTests.testSameMillisecondDistinct",
+            first.inserted && second.inserted && !again.inserted && again.rowId == first.rowId
+        )
+    } catch {
+        check("StorageTests.testSameMillisecondDistinct", false, "\(error)")
+    }
+
     // Same key written concurrently: all succeed, last writer wins visibly.
     do {
         let db = try SignalDatabase.open(path: nil, key: "k")

@@ -72,4 +72,50 @@ func runChatSessionTests() async {
     } catch {
         check("MessagingTests.testChatSessionReconnect", false, "\(error)")
     }
+
+    // A successful reconnect resets the backoff sequence: the delay after
+    // the next drop is the initial attempt again, not a grown counter.
+    do {
+        let connector = FakeConnector(scripts: [
+            [],
+            [],
+            [Data([0x01])],
+        ])
+        final class Attempts: @unchecked Sendable {
+            private let lock = NSLock()
+            private var values: [Int] = []
+            func append(_ value: Int) {
+                lock.withLock { values.append(value) }
+            }
+            var all: [Int] {
+                lock.withLock { values }
+            }
+        }
+        let attempts = Attempts()
+        let session = ChatSession(connector: connector, reconnectDelay: { attempt in
+            attempts.append(attempt)
+        })
+        try await session.connect(
+            credentials: DeviceCredentials(aci: "a", deviceId: 1, password: "p")
+        )
+        for await _ in session.incoming() {
+            break
+        }
+        // Wait for both reconnect cycles to have passed through the delay.
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if attempts.all.count >= 2 && connector.opens >= 3 {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await session.disconnect()
+        let observed = attempts.all
+        check(
+            "MessagingTests.testChatSessionBackoffResetsAfterReconnect",
+            observed.count >= 2 && observed.allSatisfy { $0 == 0 }
+        )
+    } catch {
+        check("MessagingTests.testChatSessionBackoffResetsAfterReconnect", false, "\(error)")
+    }
 }

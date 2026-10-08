@@ -55,13 +55,16 @@ public func sealedSenderEncrypt(
 
 /// Decrypts a sealed-sender envelope without a prior sender expectation.
 /// Returns the plaintext and the sender ACI from the sender certificate.
+/// Each trust root is tried in order; the first validation wins. An EMPTY
+/// list skips validation entirely — staging-only escape hatch (staging
+/// roots are unpublished; production must always pass its roots).
 /// New API for the message pipe; `sealedSenderDecrypt` below keeps its
 /// exact signature and delegates to this.
 public func sealedSenderDecryptUnknownSender(
     _ envelope: Data,
     to recipient: ProtocolAddress,
     recipientStore: any SignalProtocolStore,
-    trustRoot: PublicKey,
+    trustRoots: [PublicKey],
     context: StoreContext
 ) throws -> (plaintext: Data, senderAci: String) {
     let content = try UnidentifiedSenderMessageContent(
@@ -69,10 +72,15 @@ public func sealedSenderDecryptUnknownSender(
         identityStore: recipientStore,
         context: context
     )
-    guard content.senderCertificate.validate(
-        trustRoot: trustRoot,
-        time: UInt64(Date().timeIntervalSince1970)
-    ) else {
+    let now = UInt64(Date().timeIntervalSince1970)
+    var validated = trustRoots.isEmpty
+    for root in trustRoots {
+        if content.senderCertificate.validate(trustRoot: root, time: now) {
+            validated = true
+            break
+        }
+    }
+    guard validated else {
         throw SealedSenderHelperError.untrustedSender
     }
     let senderAci = content.senderCertificate.sender.uuidString
@@ -104,7 +112,7 @@ public func sealedSenderDecrypt(
         envelope,
         to: recipient,
         recipientStore: recipientStore,
-        trustRoot: trustRoot,
+        trustRoots: [trustRoot],
         context: context
     )
     guard senderAci == sender.name else {

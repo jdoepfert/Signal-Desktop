@@ -172,6 +172,9 @@ public actor ChatSession {
                     password: credentials.password,
                     environment: credentials.environment
                 )
+                // A successful connect ends the backoff sequence: the
+                // next drop starts over at the initial delay.
+                attempt = 0
             } catch {
                 continue
             }

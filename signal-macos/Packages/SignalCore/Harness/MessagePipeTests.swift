@@ -207,7 +207,7 @@ func runMessagePipeTests() async {
             certs: certs,
             store: fixture.bobStore,
             ourAddress: fixture.bobAddress,
-            trustRoot: fixture.trustRoot,
+            trustRoots: [fixture.trustRoot],
             incomingSource: stream
         )
         await pipe.start()
@@ -250,7 +250,7 @@ func runMessagePipeTests() async {
             certs: certs,
             store: fixture.aliceStore,
             ourAddress: fixture.aliceAddress,
-            trustRoot: fixture.trustRoot
+            trustRoots: [fixture.trustRoot]
         )
         try await pipe.sendText("hello-spike", to: pipeBob)
         // The retried envelope carries the refreshed cert; it must decrypt
@@ -283,7 +283,7 @@ func runMessagePipeTests() async {
             certs: certs,
             store: fixture.aliceStore,
             ourAddress: fixture.aliceAddress,
-            trustRoot: fixture.trustRoot
+            trustRoots: [fixture.trustRoot]
         )
         do {
             try await pipe.sendText("hello-spike", to: pipeBob)

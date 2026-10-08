@@ -23,6 +23,7 @@ let package = Package(
         .package(path: "../SignalCallsSpike"),
         .package(path: "../SignalApp"),
         .package(path: "../SignalStorage"),
+        .package(path: "../SignalLogging"),
     ],
     targets: [
         // NOTE: no linkerSettings here. Static-library targets are
@@ -34,6 +35,7 @@ let package = Package(
             dependencies: [
                 .product(name: "LibSignalClient", package: "swift"),
                 "SignalStorage",
+                "SignalLogging",
             ]
         ),
     ]

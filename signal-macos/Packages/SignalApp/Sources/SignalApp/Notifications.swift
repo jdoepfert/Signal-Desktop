@@ -41,7 +41,7 @@ public struct NotificationPolicy: Sendable {
 /// UserNotifications wiring: authorization on first link, delivery per
 /// policy, tap opens the conversation. Alert delivery itself needs a
 /// running app; the decision logic above carries the unit tests.
-public final class Notifications: NSObject {
+public final class Notifications: NSObject, @unchecked Sendable {
     public var onTap: (String) -> Void = { _ in }
 
     public override init() {

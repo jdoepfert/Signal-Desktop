@@ -8,7 +8,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -103,6 +103,37 @@ public enum MigrationChain {
             try db.alter(table: "accounts") { t in
                 t.add(column: "environment", .text).notNull().defaults(to: "staging")
             }
+        }
+        migrator.registerMigration("v5-message-linkage") { db in
+            // The v2 table's UNIQUE(sender_aci, timestamp) cannot be
+            // dropped in place, so rebuild messages (and its FTS mirror).
+            try db.drop(table: "messages_fts")
+            try db.create(table: "messages_new") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("sender_aci", .text).notNull()
+                t.column("body", .text).notNull()
+                t.column("timestamp", .integer).notNull()
+                t.column("conversation_id", .text)
+                t.column("envelope_hash", .blob)
+            }
+            try db.execute(sql: """
+                INSERT INTO messages_new (id, sender_aci, body, timestamp)
+                SELECT id, sender_aci, body, timestamp FROM messages
+                """)
+            try db.drop(table: "messages")
+            try db.rename(table: "messages_new", to: "messages")
+            // Same sender + timestamp + envelope bytes = redelivery.
+            // Missing hashes (outbound saves) coalesce to empty so they
+            // still dedupe on (sender, timestamp) like before.
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX messages_sender_timestamp_hash
+                ON messages (sender_aci, timestamp, COALESCE(envelope_hash, x''))
+                """)
+            try db.create(virtualTable: "messages_fts", using: FTS5()) { t in
+                t.synchronize(withTable: "messages")
+                t.column("body")
+            }
+            try db.execute(sql: "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
         }
         return migrator
     }

@@ -125,7 +125,7 @@ func runPersistedReceiveTests() async {
                 senderKeys: grdbSenderKeys
             ),
             ourAddress: bobAddress,
-            trustRoot: trustRootKeys.publicKey,
+            trustRoots: [trustRootKeys.publicKey],
             incomingSource: stream,
             messages: messages
         )

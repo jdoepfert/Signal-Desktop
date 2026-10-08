@@ -40,12 +40,20 @@ public final class AppState: ObservableObject {
     private var stack: LiveStack?
     private var pumpTask: Task<Void, Never>?
 
+    /// Alert policy for inbound messages; `locked` flips to title-only
+    /// when the device locks (device-lock wiring arrives later).
+    private let notificationPolicy = NotificationPolicy()
+    private let notifications = Notifications()
+
     public init(environment: AppEnvironment) {
         self.environment = environment
         composer.onSend = { [weak self] text in
             Task {
                 await self?.send(text: text)
             }
+        }
+        notifications.onTap = { [weak self] conversationId in
+            self?.select(conversationId)
         }
     }
 
@@ -106,7 +114,12 @@ public final class AppState: ObservableObject {
             try await stack.pipe.sendText(text, to: aci)
             // Persist our side so the thread shows both directions.
             if let ownAci = linkedAci {
-                _ = try stack.messages.save(senderAci: ownAci, body: text, timestamp: Self.nowMs())
+                _ = try stack.messages.save(
+                    senderAci: ownAci,
+                    body: text,
+                    timestamp: Self.nowMs(),
+                    conversationId: selection
+                )
             }
             _ = try stack.conversations.conversation(forAci: aci)
             try stack.conversations.touch(selection, timestamp: Self.nowMs())
@@ -224,7 +237,7 @@ public final class AppState: ObservableObject {
             certs: certs,
             store: protocolStore,
             ourAddress: try ProtocolAddress(name: creds.aci, deviceId: creds.deviceId),
-            trustRoot: try Self.serverTrustRoot(environment: environment),
+            trustRoots: try Self.serverTrustRoots(environment: environment),
             incomingSource: nil,
             messages: messages,
             devicesForRecipient: { recipient in
@@ -248,10 +261,15 @@ public final class AppState: ObservableObject {
             messages: messages
         )
         linkedAci = creds.aci
+        // The receive pump never runs unless the pipe's envelope pump is
+        // started: without this the app sends but never receives.
+        await pipe.start()
         pumpTask = Task {
             await self.pump()
         }
         refreshConversations()
+        // Best-effort: denial just means no alerts (policy still runs).
+        _ = try? await notifications.requestAuthorization()
     }
 
     private func pump() async {
@@ -261,15 +279,46 @@ public final class AppState: ObservableObject {
         for await message in stack.pipe.incoming() {
             do {
                 let conversation = try stack.conversations.conversation(forAci: message.senderAci)
+                // Inbound saves land unscoped (the pipe knows no thread);
+                // link them here so thread-scoped paging sees them.
+                try stack.messages.link(
+                    senderAci: message.senderAci,
+                    timestamp: message.timestamp,
+                    conversationId: conversation.id
+                )
                 try stack.conversations.touch(conversation.id, timestamp: message.timestamp)
                 try stack.conversations.incrementUnread(conversation.id)
                 refreshConversations()
                 if selection == conversation.id {
+                    try stack.conversations.markRead(conversation.id)
+                    refreshConversations()
                     await reloadThread()
+                } else {
+                    await deliverNotification(message: message, conversation: conversation)
                 }
             } catch {
                 self.error = String(describing: error)
             }
+        }
+    }
+
+    private func deliverNotification(message: DecryptedMessage, conversation: StoredConversation) async {
+        guard let stack else {
+            return
+        }
+        let title = conversationTitle(for: conversation)
+        let decision = notificationPolicy.decide(
+            message: message,
+            displayName: title,
+            muted: conversation.muted
+        )
+        guard decision != .silent else {
+            return
+        }
+        do {
+            try await notifications.deliver(decision, conversationId: conversation.id)
+        } catch {
+            // Notification delivery is best-effort; never fails the pump.
         }
     }
 
@@ -278,17 +327,21 @@ public final class AppState: ObservableObject {
             return
         }
         do {
-            // 1:1 threads: our messages plus the peer's. Group scoping by
-            // conversation id arrives with group sync.
-            let peerAci = selection.hasPrefix("aci:") ? String(selection.dropFirst(4)) : nil
-            let stored = try stack.messages.all()
+            // Thread-scoped: only messages linked to this conversation.
+            // Group scoping by conversation id arrives with group sync.
+            let stored = try stack.messages.page(in: selection, limit: 500)
             thread.replaceAll(
-                with: stored
-                    .filter { message in
-                        message.senderAci == peerAci || message.senderAci == linkedAci
-                    }
-                    .map { ThreadMessage(rowId: $0.rowId, senderAci: $0.senderAci, body: $0.body, timestamp: $0.timestamp) }
+                with: stored.map {
+                    ThreadMessage(
+                        rowId: $0.rowId,
+                        senderAci: $0.senderAci,
+                        body: $0.body,
+                        timestamp: $0.timestamp
+                    )
+                }
             )
+            try stack.conversations.markRead(selection)
+            refreshConversations()
         } catch {
             self.error = String(describing: error)
         }
@@ -328,24 +381,21 @@ public final class AppState: ObservableObject {
 
     /// Server trust roots for sender-certificate validation, from Desktop's
     /// public config (`config/production.json#serverTrustRoots`). Staging
-    /// roots are not published in this repo; staging messaging stays
-    /// unverified until they are observed live.
-    private static func serverTrustRoot(environment: AppEnvironment) throws -> PublicKey {
+    /// roots are unpublished, so staging skips validation loudly (empty
+    /// list) until they are observed live.
+    private static func serverTrustRoots(environment: AppEnvironment) throws -> [PublicKey] {
         guard environment == .production else {
-            throw ProvisioningError.envelopeInvalid
+            return []
         }
         let roots = [
             "BXu6QIKVz5MA8gstzfOgRQGqyLqOwNKHL6INkv3IHWMF",
             "BUkY0I+9+oPgDCn4+Ac6Iu813yvqkDr/ga8DzLxFxuk6",
         ]
-        guard roots.count == 2 else {
-            throw ProvisioningError.envelopeInvalid
+        return try roots.map { root in
+            guard let bytes = Data(base64Encoded: root) else {
+                throw ProvisioningError.envelopeInvalid
+            }
+            return try PublicKey(bytes)
         }
-        // Multi-root validation happens per-message in Phase 2-live;
-        // the pipe takes one root today, so use the primary.
-        guard let bytes = Data(base64Encoded: roots[0]) else {
-            throw ProvisioningError.envelopeInvalid
-        }
-        return try PublicKey(bytes)
     }
 }

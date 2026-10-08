@@ -1,8 +1,10 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import CryptoKit
 import Foundation
 import LibSignalClient
+import SignalLogging
 import SignalStorage
 
 // Content proto layout (protos/SignalService.proto, proto2):
@@ -78,7 +80,7 @@ public actor MessagePipe {
     private let certs: any SenderCertProvider
     private let store: any SignalProtocolStore
     private let ourAddress: ProtocolAddress
-    private let trustRoot: PublicKey
+    private let trustRoots: [PublicKey]
     private let source: AsyncStream<Data>?
     private let messages: MessageStore?
     private let devicesForRecipient:
@@ -100,7 +102,7 @@ public actor MessagePipe {
         certs: any SenderCertProvider,
         store: any SignalProtocolStore,
         ourAddress: ProtocolAddress,
-        trustRoot: PublicKey,
+        trustRoots: [PublicKey],
         incomingSource: AsyncStream<Data>? = nil,
         messages: MessageStore? = nil,
         devicesForRecipient: (@Sendable (String) async throws -> [(deviceId: UInt32, registrationId: UInt32)])? = nil
@@ -109,7 +111,7 @@ public actor MessagePipe {
         self.certs = certs
         self.store = store
         self.ourAddress = ourAddress
-        self.trustRoot = trustRoot
+        self.trustRoots = trustRoots
         self.source = incomingSource
         self.messages = messages
         self.devicesForRecipient = devicesForRecipient
@@ -206,13 +208,14 @@ public actor MessagePipe {
                     envelope,
                     store: store,
                     ourAddress: ourAddress,
-                    trustRoot: trustRoot
+                    trustRoots: trustRoots
                 )
                 if let messages {
                     let (_, inserted) = try messages.save(
                         senderAci: message.senderAci,
                         body: message.body,
-                        timestamp: message.timestamp
+                        timestamp: message.timestamp,
+                        envelopeHash: Data(SHA256.hash(data: envelope))
                     )
                     guard inserted else {
                         continue
@@ -220,7 +223,8 @@ public actor MessagePipe {
                 }
                 continuation.yield(message)
             } catch {
-                // Drop undecodable inbound messages (logged in Phase 2).
+                Logger(subsystem: "pipe", category: "receive")
+                    .error("dropping undecodable inbound message")
                 continue
             }
         }
@@ -231,7 +235,7 @@ public actor MessagePipe {
         _ envelope: Data,
         store: any SignalProtocolStore,
         ourAddress: ProtocolAddress,
-        trustRoot: PublicKey
+        trustRoots: [PublicKey]
     ) throws -> DecryptedMessage {
         let (plaintext, senderAci): (Data, String)
         do {
@@ -239,7 +243,7 @@ public actor MessagePipe {
                 envelope,
                 to: ourAddress,
                 recipientStore: store,
-                trustRoot: trustRoot,
+                trustRoots: trustRoots,
                 context: NullContext()
             )
         } catch {

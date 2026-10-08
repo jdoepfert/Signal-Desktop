@@ -20,7 +20,7 @@ func runConversationViewModelTests() async {
         )
     }
 
-    // Pagination returns newest-first pages from the store.
+    // Scoped pagination returns newest-first pages for one conversation.
     do {
         let db = try SignalDatabase.open(path: nil, key: "k")
         let messages = MessageStore(queue: db.queue)
@@ -28,17 +28,27 @@ func runConversationViewModelTests() async {
             _ = try messages.save(
                 senderAci: "a",
                 body: "m\(i)",
-                timestamp: UInt64(i * 100)
+                timestamp: UInt64(i * 100),
+                conversationId: "aci:a"
             )
         }
+        // A message in another conversation must not leak into the page.
+        _ = try messages.save(
+            senderAci: "b",
+            body: "other",
+            timestamp: 600,
+            conversationId: "aci:b"
+        )
         let viewModel = ConversationViewModel()
-        try await viewModel.loadLatest(limit: 2, from: messages)
+        try await viewModel.loadLatest(in: "aci:a", limit: 2, from: messages)
         let firstPage = viewModel.messages.map(\.body)
-        try await viewModel.loadOlder(limit: 2, from: messages)
+        try await viewModel.loadOlder(in: "aci:a", limit: 2, from: messages)
         let bothPages = viewModel.messages.map(\.body)
         check(
             "MessagingTests.testThreadPagination",
-            firstPage == ["m4", "m5"] && bothPages == ["m2", "m3", "m4", "m5"]
+            firstPage == ["m4", "m5"]
+                && bothPages == ["m2", "m3", "m4", "m5"]
+                && !bothPages.contains("other")
         )
     } catch {
         check("MessagingTests.testThreadPagination", false, "\(error)")

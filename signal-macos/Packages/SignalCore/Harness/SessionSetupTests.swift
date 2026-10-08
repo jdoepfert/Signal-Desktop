@@ -139,7 +139,7 @@ func runSessionSetupTests() async {
             certs: certs,
             store: aliceStore,
             ourAddress: aliceAddress,
-            trustRoot: trustKeys.publicKey
+            trustRoots: [trustKeys.publicKey]
         )
         try await pipe.sendText("one", to: setupBob)
         try await pipe.sendText("two", to: setupBob)
@@ -257,7 +257,7 @@ func runUnknownSenderTests() async {
             certs: FakeCerts(first: senderCert, second: senderCert),
             store: bobStore,
             ourAddress: bobAddress,
-            trustRoot: trustKeys.publicKey,
+            trustRoots: [trustKeys.publicKey],
             incomingSource: stream
         )
         await pipe.start()
