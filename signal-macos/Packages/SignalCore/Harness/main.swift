@@ -51,6 +51,7 @@ await runAsync("MessagePipeTests") {
 
 run("EnvironmentTests") {
     runPinVersionsFormatTests()
+    runBootstrapTests()
 }
 
 run("LoggingTests") {

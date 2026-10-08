@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
+import SignalApp
 
 private func toolsURL(_ name: String) -> URL {
     // Harness/EnvironmentTests.swift -> Harness -> SignalCore -> Packages
@@ -53,4 +54,25 @@ func runPinVersionsFormatTests() {
 
 private enum PinVersionsError: Error {
     case scriptFailed(Int32)
+}
+
+func runBootstrapTests() {
+    do {
+        let def = try AppEnvironment.resolve(arguments: [], environment: [:])
+        let prod = try AppEnvironment.resolve(arguments: ["--production"], environment: [:])
+        let viaEnv = try AppEnvironment.resolve(arguments: [], environment: ["SIGNAL_ENV": "production"])
+        check(
+            "EnvironmentTests.testResolve",
+            def == .staging && prod == .production && viaEnv == .production
+        )
+    } catch {
+        check("EnvironmentTests.testResolve", false, "\(error)")
+    }
+
+    do {
+        _ = try AppEnvironment.resolve(arguments: [], environment: ["SIGNAL_ENV": "canary"])
+        check("EnvironmentTests.testResolveUnknown", false, "no error thrown")
+    } catch {
+        check("EnvironmentTests.testResolveUnknown", true)
+    }
 }
