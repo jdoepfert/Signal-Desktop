@@ -333,15 +333,17 @@ public actor OutgoingSender {
                 dataMessage.expireTimerVersion = version
             }
         }
-        var content = SignalServiceProtos_Content()
-        content.dataMessage = dataMessage
-        try await send(content, to: aci, timestamp: timestamp)
-
-        // Note to Self is a send to our own ACI (our other devices already
-        // get it) and needs no separate transcript.
-        guard aci != ourAci else {
-            return
+        let isNoteToSelf = aci == ourAci
+        if !isNoteToSelf {
+            var content = SignalServiceProtos_Content()
+            content.dataMessage = dataMessage
+            try await send(content, to: aci, timestamp: timestamp)
         }
+
+        // The sent-sync transcript tells our other devices what we sent.
+        // For Note to Self it IS the message: Desktop sends only the
+        // transcript (`sendSyncMessageOnly`, destination = our own ACI) and
+        // never a DataMessage to ourselves.
         var sent = SignalServiceProtos_SyncMessage.Sent()
         sent.destinationServiceID = aci
         sent.timestamp = timestamp
@@ -355,9 +357,15 @@ public actor OutgoingSender {
         syncContent.syncMessage = sync
         do {
             let padded = Padding.pad(try syncContent.serializedData())
-            // Desktop sends the transcript non-urgent.
+            // Desktop sends the transcript non-urgent. With no other
+            // devices `deliver` finds nobody to send to and returns.
             try await deliver(padded, to: ourAci, timestamp: timestamp, sealed: false, urgent: false)
         } catch {
+            if isNoteToSelf {
+                // The transcript is the only delivery: a failure is a failed
+                // send.
+                throw error
+            }
             // The recipient already has the message; a missing transcript
             // only means our other devices miss it. Not a send failure.
             Self.logger.error("sent-sync transcript failed: \(Self.reason(error))")

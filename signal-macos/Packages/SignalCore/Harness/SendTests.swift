@@ -350,7 +350,8 @@ func runSendTests() async {
     await testUnknownProfileKeyUsesAuthenticated()
     await testUnauthorizedFailsOverToAuthenticated()
     await testSentSyncAfterSend()
-    await testNoteToSelfSkipsOwnDevice()
+    await testNoteToSelfSendsOnlySyncTranscript()
+    await testNoteToSelfWithNoOtherDevicesStillStoresRow()
     await testReturnedTimestampIsStored()
     await testFailedSendMarksFailed()
     await testDataMessageFields()
@@ -610,19 +611,61 @@ private func testSentSyncAfterSend() async {
     }
 }
 
-private func testNoteToSelfSkipsOwnDevice() async {
+// I3: Desktop sends Note to Self as a sent-sync TRANSCRIPT only
+// (`sendSyncMessageOnly`): one request, to our OTHER devices, carrying
+// SyncMessage.Sent{destination = us}; never a DataMessage to our own ACI.
+private func testNoteToSelfSendsOnlySyncTranscript() async {
     do {
         let f = try makeFixture(ownOther: [1, 5])
-        _ = try await f.sender.sendText("note", to: ourAci)
+        let timestamp = try await f.sender.sendText("note", to: ourAci)
         let requests = f.submitter.requests
-        check(
-            "SendTests.testNoteToSelfSkipsOwnDevice",
-            requests.count == 1 && requests[0].destination == ourAci
-                && deviceIds(requests[0]) == [1, 5],
-            "requests=\(requests.map(deviceIds))"
+        guard requests.count == 1 else {
+            check("SendTests.testNoteToSelfSendsOnlySyncTranscript", false, "requests=\(requests.count)")
+            return
+        }
+        let request = requests[0]
+        let padded = try f.ours[1]!.decryptPadded(request.messages[0], from: f.ourAddress, trustRoot: f.trustRoot)
+        let content = try SignalServiceProtos_Content(serializedBytes: try Padding.unpad(padded))
+        var isSync = false
+        var hasData = false
+        switch content.content {
+        case .syncMessage?: isSync = true
+        case .dataMessage?: hasData = true
+        default: break
+        }
+        let rows = try f.rig.messages.all()
+        try checkT(
+            "SendTests.testNoteToSelfSendsOnlySyncTranscript",
+            request.destination == ourAci && deviceIds(request) == [1, 5]
+                && !request.urgent && request.timestamp == timestamp
+                && isSync && !hasData
+                && content.syncMessage.sent.destinationServiceID == ourAci
+                && content.syncMessage.sent.timestamp == timestamp
+                && content.syncMessage.sent.message.body == "note"
+                && content.syncMessage.sent.message.timestamp == timestamp
+                && rows.count == 1 && rows[0].status == "sent"
+                && rows[0].conversationId == "aci:\(ourAci)" && rows[0].timestamp == timestamp,
+            "dest=\(request.destination) devices=\(deviceIds(request)) hasData=\(hasData) rows=\(rows.count)"
         )
     } catch {
-        check("SendTests.testNoteToSelfSkipsOwnDevice", false, "\(error)")
+        check("SendTests.testNoteToSelfSendsOnlySyncTranscript", false, "\(error)")
+    }
+}
+
+// No other devices: nothing to send, the row is still stored as sent.
+private func testNoteToSelfWithNoOtherDevicesStillStoresRow() async {
+    do {
+        let f = try makeFixture(ownOther: [])
+        let timestamp = try await f.sender.sendText("alone", to: ourAci)
+        let rows = try f.rig.messages.all()
+        try checkT(
+            "SendTests.testNoteToSelfWithNoOtherDevicesStillStoresRow",
+            f.submitter.requests.isEmpty && rows.count == 1 && rows[0].status == "sent"
+                && rows[0].body == "alone" && rows[0].timestamp == timestamp,
+            "requests=\(f.submitter.requests.count) rows=\(rows)"
+        )
+    } catch {
+        check("SendTests.testNoteToSelfWithNoOtherDevicesStillStoresRow", false, "\(error)")
     }
 }
 
