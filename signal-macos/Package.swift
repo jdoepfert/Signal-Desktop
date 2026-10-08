@@ -23,6 +23,7 @@ let package = Package(
         .package(path: libsignalSwiftPath),
         .package(path: "Packages/SignalCallsSpike"),
         .package(path: "Packages/SignalApp"),
+        .package(path: "Packages/SignalStorage"),
     ],
     targets: [
         .target(
@@ -38,6 +39,7 @@ let package = Package(
                 .product(name: "LibSignalClient", package: "swift"),
                 .product(name: "SignalCallsSpike", package: "SignalCallsSpike"),
                 "SignalApp",
+                "SignalStorage",
             ],
             path: "Packages/SignalCore/Harness",
             linkerSettings: [

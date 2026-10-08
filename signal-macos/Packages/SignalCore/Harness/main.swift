@@ -58,4 +58,8 @@ run("LoggingTests") {
     runLoggingTests()
 }
 
+await runAsync("StorageTests") {
+    await runStorageTests()
+}
+
 exit(checkResult())
