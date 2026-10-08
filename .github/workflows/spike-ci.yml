@@ -44,6 +44,13 @@ jobs:
           EXPECTED="libsignal=${EXPECTED_LIBSIGNAL_SHA} ringrtc=${EXPECTED_RINGRTC_SHA} webrtc=${EXPECTED_WEBRTC_TAG}"
           test "$PINS" = "$EXPECTED"
 
+      - name: Generated protobuf is up to date
+        run: |
+          cd signal-macos
+          swift package resolve
+          Tools/gen-protos.sh
+          git diff --exit-code Packages/SignalCore/Sources/SignalCore/Proto
+
       - name: Run SpikeHarness
         run: cd signal-macos && swift run SpikeHarness
 

@@ -10,21 +10,63 @@ import Foundation
 import LibSignalClient
 import SignalLogging
 import SignalStorage
-
-// Content proto layout (protos/SignalService.proto, proto2):
-//   Content { DataMessage dataMessage = 1; }
-//   DataMessage { optional string body = 1; ... optional uint64 timestamp = 7; }
+import SwiftProtobuf
 
 public struct DecryptedMessage: Sendable, Equatable {
     public let senderAci: String
+    /// `dataMessage.body`; empty when the message has none.
     public let body: String
+    /// `dataMessage.timestamp`.
     public let timestamp: UInt64
+    /// The full decoded Content (reactions, attachments, expire timer, ...).
+    public let content: SignalServiceProtos_Content
 
-    public init(senderAci: String, body: String, timestamp: UInt64) {
+    public init(senderAci: String, content: SignalServiceProtos_Content) {
         self.senderAci = senderAci
-        self.body = body
-        self.timestamp = timestamp
+        self.content = content
+        self.body = content.dataMessage.body
+        self.timestamp = content.dataMessage.timestamp
     }
+
+    /// Text-only convenience: builds Content{dataMessage{body,timestamp}}.
+    public init(senderAci: String, body: String, timestamp: UInt64) {
+        self.init(
+            senderAci: senderAci,
+            content: makeTextContent(body: body, timestamp: timestamp)
+        )
+    }
+}
+
+/// Content{dataMessage{body,timestamp}} for an outgoing text message.
+public func makeTextContent(body: String, timestamp: UInt64) -> SignalServiceProtos_Content {
+    var dataMessage = SignalServiceProtos_DataMessage()
+    dataMessage.body = body
+    dataMessage.timestamp = timestamp
+    var content = SignalServiceProtos_Content()
+    content.dataMessage = dataMessage
+    return content
+}
+
+/// Serialized form of `makeTextContent`, shared by the 1:1 pipe and the
+/// group manager.
+public func encodeTextContent(body: String, timestamp: UInt64) throws -> Data {
+    try makeTextContent(body: body, timestamp: timestamp).serializedData()
+}
+
+/// Decodes decrypted Content bytes into a message. Content without a
+/// dataMessage (receipts, typing, sync) is not a text message and throws
+/// `invalidContent`; callers can widen this as those paths land.
+public func decodeContentMessage(_ plaintext: Data, senderAci: String) throws -> DecryptedMessage {
+    let content: SignalServiceProtos_Content
+    do {
+        content = try SignalServiceProtos_Content(serializedBytes: plaintext)
+    } catch {
+        throw MessagePipeError.invalidContent
+    }
+    guard case .dataMessage = content.content else {
+        throw MessagePipeError.invalidContent
+    }
+    return DecryptedMessage(senderAci: senderAci, content: content)
 }
 
 public enum MessagePipeError: Error, Equatable {
@@ -191,11 +233,7 @@ public actor MessagePipe {
         cert: SenderCertificate,
         recipient: ProtocolAddress
     ) throws -> Data {
-        var dataMessage = Data()
-        dataMessage.append(ContentCodec.lengthDelimitedField(1, Data(text.utf8)))
-        dataMessage.append(ContentCodec.varintField(7, timestamp))
-        var content = Data()
-        content.append(ContentCodec.lengthDelimitedField(1, dataMessage))
+        let content = try encodeTextContent(body: text, timestamp: timestamp)
         return try sealedSenderEncrypt(
             content,
             from: cert,

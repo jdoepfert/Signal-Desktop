@@ -50,6 +50,7 @@ let package = Package(
         // Test-only search needs GRDB directly; version owned by
         // SignalStorage/Package.swift, keep the revision in sync.
         grdbDependency,
+        .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.38.1"),
     ] + cryptoPackages,
     targets: [
         .target(
@@ -59,6 +60,7 @@ let package = Package(
                 "SignalCore",
                 "SignalStorage",
                 .product(name: "GRDB", package: grdbPackage),
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ] + cryptoProducts
         ),
     ]

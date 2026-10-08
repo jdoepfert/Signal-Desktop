@@ -107,6 +107,11 @@ await runAsync("MessagingTests") {
     await runStandaloneRegistrationTests()
 }
 
+run("PaddingTests") {
+    runPaddingTests()
+    runContentVectorTests()
+}
+
 run("VectorTests") {
     check(
         "VectorTests.testLoadsAll",

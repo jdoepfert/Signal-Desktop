@@ -4,6 +4,7 @@
 import Foundation
 import LibSignalClient
 import SignalCore
+import SwiftProtobuf
 
 // In-memory transport double: loopback delivery, scripted failures.
 final class FakeChatTransport: SealedMessageTransport, @unchecked Sendable {
@@ -186,11 +187,8 @@ func runMessagePipeTests() async {
     do {
         let fixture = try PipeFixture.make()
         let context = NullContext()
-        var dataMessage = Data()
-        dataMessage.append(protoFieldForPipe(1, Data("hello-spike".utf8)))
-        dataMessage.append(protoVarintFieldForPipe(7, 12345))
-        var content = Data()
-        content.append(protoFieldForPipe(1, dataMessage))
+        let content = try makeTextContent(body: "hello-spike", timestamp: 12345)
+            .serializedData()
         let envelope = try sealedSenderEncrypt(
             content,
             from: fixture.senderCert,
@@ -298,35 +296,4 @@ func runMessagePipeTests() async {
     } catch {
         check("MessagePipeTests.testSendSurfacesRepeatedRejection", false, "\(error)")
     }
-}
-
-private func protoFieldForPipe(_ number: Int, _ bytes: Data) -> Data {
-    var out = Data()
-    out.append(UInt8(number << 3 | 2))
-    var count = bytes.count
-    repeat {
-        var byte = UInt8(count & 0x7F)
-        count >>= 7
-        if count != 0 {
-            byte |= 0x80
-        }
-        out.append(byte)
-    } while count != 0
-    out.append(bytes)
-    return out
-}
-
-private func protoVarintFieldForPipe(_ number: Int, _ value: UInt64) -> Data {
-    var out = Data()
-    out.append(UInt8(number << 3))
-    var rest = value
-    repeat {
-        var byte = UInt8(rest & 0x7F)
-        rest >>= 7
-        if rest != 0 {
-            byte |= 0x80
-        }
-        out.append(byte)
-    } while rest != 0
-    return out
 }

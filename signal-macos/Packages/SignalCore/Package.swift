@@ -10,7 +10,8 @@ import PackageDescription
 // artifact), hence the path dependency. Library search dirs derive from
 // the checkout location, so fresh clones work if third-party checkouts
 // live at these relative paths (see signal-macos/CI-LANE.md).
-// Keep this file in sync with signal-macos/Package.swift.
+// Keep this file in sync with signal-macos/Package.swift (swift-protobuf is
+// pinned identically in the root, SignalCore and SignalMessaging manifests).
 let thirdParty = "../../../.superpowers/sdd/2026-10-07-native-swift-spike/third-party"
 let libsignalSwiftPath = thirdParty + "/libsignal/swift"
 
@@ -38,6 +39,7 @@ let package = Package(
         .package(path: "../SignalApp"),
         .package(path: "../SignalStorage"),
         .package(path: "../SignalLogging"),
+        .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.38.1"),
     ] + cryptoPackages,
     targets: [
         // NOTE: no linkerSettings here. Static-library targets are
@@ -50,6 +52,7 @@ let package = Package(
                 .product(name: "LibSignalClient", package: "swift"),
                 "SignalStorage",
                 "SignalLogging",
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ] + cryptoProducts
         ),
     ]

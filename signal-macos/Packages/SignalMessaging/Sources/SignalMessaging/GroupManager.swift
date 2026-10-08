@@ -97,7 +97,7 @@ public final class GroupManager: @unchecked Sendable {
             throw GroupSendError.unknownGroup
         }
         let distributionId = Self.distributionId(masterKey: masterKey, sender: ourAddress)
-        let content = GroupManager.content(text: text)
+        let content = try GroupManager.content(text: text)
         try await ensureDistributed(state: state, distributionId: distributionId)
         do {
             try await sendCiphertext(content, state: state, distributionId: distributionId)
@@ -136,14 +136,9 @@ public final class GroupManager: @unchecked Sendable {
         return try decodeContentMessage(plaintext, senderAci: sender.name)
     }
 
-    private static func content(text: String) -> Data {
-        var dataMessage = Data()
+    private static func content(text: String) throws -> Data {
         let timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
-        dataMessage.append(ContentCodec.lengthDelimitedField(1, Data(text.utf8)))
-        dataMessage.append(ContentCodec.varintField(7, timestamp))
-        var content = Data()
-        content.append(ContentCodec.lengthDelimitedField(1, dataMessage))
-        return content
+        return try encodeTextContent(body: text, timestamp: timestamp)
     }
 
     private func distributionKey(group: Data, aci: String, deviceId: UInt32) -> String {

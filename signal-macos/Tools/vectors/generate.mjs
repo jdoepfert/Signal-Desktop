@@ -86,7 +86,7 @@ function padMessage(buf) {
 }
 
 {
-  const cases = [0, 1, 158, 159, 160, 500].map(n => {
+  const cases = [0, 1, 78, 79, 80, 158, 159, 160, 500].map(n => {
     const plain = seeded(`padding/${n}`, n);
     return { length: n, plain: hex(plain), padded: hex(padMessage(plain)) };
   });

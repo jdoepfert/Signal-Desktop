@@ -44,6 +44,23 @@ The AES known-answer fixture
 (`Packages/SignalCore/Fixtures/aes-cbc-known-answer.json`) was
 generated with `openssl enc -aes-256-cbc` and is independent of `AesCbc`.
 
+## Generated protobuf (checked in)
+
+`Packages/SignalCore/Sources/SignalCore/Proto/` holds SwiftProtobuf output
+generated from Desktop's own `protos/` (types are prefixed
+`SignalServiceProtos_`). `Tools/gen-protos.sh` builds `protoc-gen-swift`
+from the resolved swift-protobuf checkout, refuses to run if its version
+differs from the manifests' pin, and regenerates. CI check (needs `protoc`;
+run after `swift package resolve`): the generated tree must be unchanged.
+
+```sh
+cd signal-macos
+Tools/gen-protos.sh && git diff --exit-code Packages/SignalCore/Sources/SignalCore/Proto
+```
+
+Bump swift-protobuf in the root, `SignalCore` and `SignalMessaging`
+manifests together (and `Package.resolved`), then regenerate.
+
 ## Linux lane
 
 A verification lane for the non-UI packages (SignalCore, SignalStorage,

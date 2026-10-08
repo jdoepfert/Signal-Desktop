@@ -54,6 +54,7 @@ let package = Package(
         grdbDependency,
         .package(path: "Packages/SignalMessaging"),
         .package(path: "Packages/SignalLogging"),
+        .package(url: "https://github.com/apple/swift-protobuf.git", exact: "1.38.1"),
     ] + cryptoPackages,
     targets: [
         .executableTarget(
@@ -75,6 +76,7 @@ let package = Package(
                 .product(name: "GRDB", package: grdbPackage),
                 "SignalMessaging",
                 "SignalLogging",
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ] + cryptoProducts,
             path: "Packages/SignalCore/Harness",
             exclude: ["Vectors"],
