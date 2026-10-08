@@ -36,7 +36,8 @@ public struct ThreadMessage: Sendable, Equatable, Comparable {
         self.init(
             rowId: stored.rowId,
             senderAci: stored.senderAci,
-            body: stored.body,
+            // Placeholder rows (unsupported/undecryptable) show fixed text.
+            body: stored.displayBody,
             timestamp: stored.timestamp
         )
     }

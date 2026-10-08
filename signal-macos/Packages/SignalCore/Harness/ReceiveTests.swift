@@ -49,6 +49,12 @@ func runReceiveTests() async {
     await testInboundProfileKeyPersisted()
     await testSyncTranscriptProfileKeyIgnored()
     await testNon32ByteProfileKeyIgnored()
+    await testPniEnvelopePlaceholderNotRetried()
+    await testSenderKeyEnvelopePlaceholder()
+    await testDecryptFailureAtCapWritesPlaceholder()
+    await testSealedDecryptFailureAtCapUsesCertificateSender()
+    await testBinaryDestinationMismatchRejected()
+    testPlaceholderDisplayText()
 }
 
 // Sealed-sender and PREKEY_MESSAGE vectors from Desktop's stack through the
@@ -758,4 +764,308 @@ private func testNon32ByteProfileKeyIgnored() async {
     } catch {
         check("ReceiveTests.testNon32ByteProfileKeyIgnored", false, "\(error)")
     }
+}
+
+// MARK: - Acked-then-dropped envelopes (fix round A, F3)
+
+private let otherAci = "dddddddd-1111-4222-8333-444444444444"
+
+/// Re-writes a wrapped envelope's destination to the BINARY field only.
+private func withBinaryDestination(_ bytes: Data, _ binary: Data) throws -> Data {
+    var envelope = try SignalServiceProtos_Envelope(serializedBytes: bytes)
+    envelope.clearDestinationServiceID()
+    envelope.destinationServiceIDBinary = binary
+    return try envelope.serializedData()
+}
+
+private func rawAci(_ aci: String) -> Data {
+    let uuid = UUID(uuidString: aci)!.uuid
+    return Data([
+        uuid.0, uuid.1, uuid.2, uuid.3, uuid.4, uuid.5, uuid.6, uuid.7,
+        uuid.8, uuid.9, uuid.10, uuid.11, uuid.12, uuid.13, uuid.14, uuid.15,
+    ])
+}
+
+private func placeholderRows(_ rig: ReceiverRig) throws -> [StoredMessage] {
+    try rig.messages.all().filter { $0.kind == "unsupported" || $0.kind == "undecryptable" }
+}
+
+// A PNI-addressed envelope can never be decrypted here (Milestone A holds
+// no PNI session state; receiving PNI messages is out of scope). It must
+// not be retried for three launches: one transaction writes a placeholder
+// in the sender's 1:1 thread and deletes the cache row.
+private func testPniEnvelopePlaceholderNotRetried() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let receiver = try rig.receiver(trustRoots: [])
+        let collector = ReceivedCollector(receiver)
+        let acks = AckCounter()
+        let ts: UInt64 = 1_700_002_000_000
+        let ciphertext = try peer.encrypt(content: try dataContent(body: "to pni", timestamp: ts), to: rig.address)
+        let bytes = try wrapInEnvelope(
+            type: .prekeyMessage,
+            content: ciphertext.serialize(),
+            source: (peer.aci, peer.deviceId),
+            destination: "PNI:\(otherAci)",
+            clientTimestamp: ts
+        )
+        await receiver.process(acks.envelope(bytes))
+        await collector.stop(receiver)
+        let rows = try placeholderRows(rig)
+        let unread = try rig.conversations.allConversations().map(\.unread)
+        // The ciphertext was never touched: no session, prekey intact.
+        try checkT(
+            "ReceiveTests.testPniEnvelopePlaceholderNotRetried",
+            rows.count == 1 && rows[0].kind == "unsupported" && rows[0].senderAci == peer.aci
+                && rows[0].conversationId == "aci:\(peer.aci)" && rows[0].body.isEmpty
+                && rows[0].status == nil
+                && (try rig.unprocessed.count()) == 0 && acks.total == 1
+                && (try rig.rowCount("sessions")) == 0
+                && collector.all.map(\.kind) == ["unsupported"] && unread == [1],
+            "rows=\(rows) unread=\(unread)"
+        )
+
+        // Sealed sender to a PNI: the sender is not recoverable, so there is
+        // no placeholder, but the row is still dropped immediately.
+        let root = IdentityKeyPair.generate()
+        let server = IdentityKeyPair.generate()
+        let sealed = try sealedEnvelope(
+            from: peer,
+            to: rig,
+            content: try dataContent(body: "sealed pni", timestamp: ts + 1),
+            clientTimestamp: ts + 1,
+            root: root,
+            server: server
+        )
+        var envelope = try SignalServiceProtos_Envelope(serializedBytes: sealed)
+        envelope.destinationServiceID = "PNI:\(otherAci)"
+        let beforeRows = try placeholderRows(rig).count
+        await receiver.process(acks.envelope(try envelope.serializedData()))
+        try checkT(
+            "ReceiveTests.testPniSealedDroppedWithoutPlaceholder",
+            (try placeholderRows(rig)).count == beforeRows && (try rig.unprocessed.count()) == 0
+        )
+    } catch {
+        check("ReceiveTests.testPniEnvelopePlaceholderNotRetried", false, "\(error)")
+    }
+}
+
+// A sealed-sender SENDERKEY (group) message is permanent too: placeholder
+// attributed to the certificate's (trust-root validated) sender.
+private func testSenderKeyEnvelopePlaceholder() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let root = IdentityKeyPair.generate()
+        let server = IdentityKeyPair.generate()
+        let distributionId = UUID()
+        _ = try SenderKeyDistributionMessage(
+            from: peer.address,
+            distributionId: distributionId,
+            store: peer.store,
+            context: NullContext()
+        )
+        func groupEnvelope(_ timestamp: UInt64) throws -> Data {
+            let group = try groupEncrypt(
+                Padding.pad(try dataContent(body: "group", timestamp: timestamp)),
+                from: peer.address,
+                distributionId: distributionId,
+                store: peer.store,
+                context: NullContext()
+            )
+            let usmc = try UnidentifiedSenderMessageContent(
+                group,
+                from: peer.senderCertificate(root: root, server: server),
+                contentHint: .default,
+                groupId: []
+            )
+            let sealed = try LibSignalClient.sealedSenderEncrypt(
+                usmc,
+                for: rig.address,
+                identityStore: peer.store,
+                context: NullContext()
+            )
+            return try wrapInEnvelope(
+                type: .unidentifiedSender,
+                content: sealed,
+                destination: rig.ourAci,
+                clientTimestamp: timestamp
+            )
+        }
+        let receiver = try rig.receiver(trustRoots: [root.publicKey])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(try groupEnvelope(1_700_002_100_000)))
+        let rows = try placeholderRows(rig)
+        try checkT(
+            "ReceiveTests.testSenderKeyEnvelopePlaceholder",
+            rows.count == 1 && rows[0].kind == "unsupported" && rows[0].senderAci == peer.aci
+                && rows[0].senderDevice == peer.deviceId
+                && rows[0].conversationId == "aci:\(peer.aci)"
+                && (try rig.unprocessed.count()) == 0 && acks.total == 1,
+            "rows=\(rows)"
+        )
+
+        // A receiver that does not trust the certificate's root must not
+        // attribute a placeholder to an unvalidated (spoofable) sender.
+        let rogue = try rig.receiver(trustRoots: [IdentityKeyPair.generate().publicKey])
+        await rogue.process(AckCounter().envelope(try groupEnvelope(1_700_002_101_000)))
+        try checkT(
+            "ReceiveTests.testUnvalidatedSenderGetsNoPlaceholder",
+            (try placeholderRows(rig)).count == 1 && (try rig.unprocessed.count()) == 0
+        )
+    } catch {
+        check("ReceiveTests.testSenderKeyEnvelopePlaceholder", false, "\(error)")
+    }
+}
+
+/// Flips the last byte of the libsignal ciphertext (inside the MAC), so
+/// the decrypt really fails and rolls back.
+private func corruptedPrekeyEnvelope(
+    from peer: TestPeer,
+    to rig: ReceiverRig,
+    timestamp: UInt64
+) throws -> Data {
+    var content = try peer.encrypt(
+        content: try dataContent(body: "will not decrypt", timestamp: timestamp),
+        to: rig.address
+    ).serialize()
+    content[content.count - 1] ^= 0xff
+    return try wrapInEnvelope(
+        type: .prekeyMessage,
+        content: content,
+        source: (peer.aci, peer.deviceId),
+        destination: rig.ourAci,
+        clientTimestamp: timestamp
+    )
+}
+
+// A decrypt failure is retried (it can succeed once earlier messages
+// arrive), but when the cap is hit the user gets a placeholder BEFORE the
+// row is deleted. The corrupt ciphertext rolls back like a real bad MAC.
+private func testDecryptFailureAtCapWritesPlaceholder() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        let ts: UInt64 = 1_700_002_200_000
+        await receiver.process(acks.envelope(try corruptedPrekeyEnvelope(from: peer, to: rig, timestamp: ts)))
+        let afterFirst = try rig.unprocessed.all().first
+        let rolledBack = try rig.rowCount("sessions") == 0 && rig.rowCount("identities") == 0
+        await receiver.replayUnprocessed()
+        await receiver.replayUnprocessed()
+        let afterThird = try rig.unprocessed.all().first
+        let noPlaceholderYet = try placeholderRows(rig).isEmpty
+        await receiver.replayUnprocessed()
+        let rows = try placeholderRows(rig)
+        try checkT(
+            "ReceiveTests.testDecryptFailureAtCapWritesPlaceholder",
+            afterFirst?.attempts == 1 && rolledBack && afterThird?.attempts == 3 && noPlaceholderYet
+                && rows.count == 1 && rows[0].kind == "undecryptable" && rows[0].senderAci == peer.aci
+                && rows[0].conversationId == "aci:\(peer.aci)" && rows[0].body.isEmpty
+                && (try rig.unprocessed.count()) == 0 && acks.total == 1,
+            "afterFirst=\(String(describing: afterFirst?.attempts)) afterThird=\(String(describing: afterThird?.attempts)) rows=\(rows)"
+        )
+    } catch {
+        check("ReceiveTests.testDecryptFailureAtCapWritesPlaceholder", false, "\(error)")
+    }
+}
+
+// Sealed sender whose OUTER layer opens but whose inner prekey message
+// cannot be processed (the one-time prekey is gone): at the cap the
+// placeholder is attributed via the validated sender certificate.
+private func testSealedDecryptFailureAtCapUsesCertificateSender() async {
+    do {
+        let sender = try ReceiverRig(ourAci: "bbbbbbbb-1111-4222-8333-444444444444", ourDevice: 3)
+        try sender.provisionOwnKeys()
+        let peer = try TestPeer(aci: "aaaaaaaa-1111-4222-8333-444444444444", deviceId: 1)
+        try peer.establish(with: sender.makeBundle(), recipient: sender.address)
+        // The receiving device has the same identity but none of the
+        // prekeys the peer used.
+        let rig = try ReceiverRig(ourAci: sender.ourAci, ourDevice: 3)
+        try rig.identity.storeAccountIdentity(
+            aci: try sender.identity.identityKeyPair(context: NullContext()),
+            pni: IdentityKeyPair.generate(),
+            registrationId: 1234
+        )
+        let root = IdentityKeyPair.generate()
+        let bytes = try sealedEnvelope(
+            from: peer,
+            to: rig,
+            content: try dataContent(body: "x", timestamp: 1_700_002_300_000),
+            clientTimestamp: 1_700_002_300_000,
+            root: root,
+            server: IdentityKeyPair.generate()
+        )
+        let receiver = try rig.receiver(trustRoots: [root.publicKey])
+        await receiver.process(AckCounter().envelope(bytes))
+        let attemptsAfterProcess = try rig.unprocessed.all().first?.attempts
+        await receiver.replayUnprocessed()
+        await receiver.replayUnprocessed()
+        await receiver.replayUnprocessed()
+        let rows = try placeholderRows(rig)
+        try checkT(
+            "ReceiveTests.testSealedDecryptFailureAtCapUsesCertificateSender",
+            attemptsAfterProcess == 1 && rows.count == 1 && rows[0].kind == "undecryptable"
+                && rows[0].senderAci == peer.aci && rows[0].senderDevice == peer.deviceId
+                && (try rig.unprocessed.count()) == 0,
+            "attempts=\(String(describing: attemptsAfterProcess)) rows=\(rows)"
+        )
+    } catch {
+        check("ReceiveTests.testSealedDecryptFailureAtCapUsesCertificateSender", false, "\(error)")
+    }
+}
+
+// destinationServiceIdBinary must be checked too (16 raw bytes = ACI;
+// 0x01 + 16 = PNI), not just the string field.
+private func testBinaryDestinationMismatchRejected() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        let ts: UInt64 = 1_700_002_400_000
+        func envelope(_ binary: Data, _ stamp: UInt64) throws -> Data {
+            let ciphertext = try peer.encrypt(content: try dataContent(body: "b", timestamp: stamp), to: rig.address)
+            return try withBinaryDestination(
+                try wrapInEnvelope(
+                    type: .prekeyMessage,
+                    content: ciphertext.serialize(),
+                    source: (peer.aci, peer.deviceId),
+                    destination: rig.ourAci,
+                    clientTimestamp: stamp
+                ),
+                binary
+            )
+        }
+        // Someone else's ACI, and a PNI: both rejected before any decrypt.
+        await receiver.process(acks.envelope(try envelope(rawAci(otherAci), ts)))
+        await receiver.process(acks.envelope(try envelope(Data([0x01]) + rawAci(otherAci), ts + 1)))
+        let rejected = try placeholderRows(rig)
+        let noSession = try rig.rowCount("sessions") == 0
+        // Our own binary ACI is accepted and decrypts.
+        await receiver.process(acks.envelope(try envelope(rawAci(rig.ourAci), ts + 2)))
+        let texts = try rig.messages.all().filter { $0.kind == "text" }
+        try checkT(
+            "ReceiveTests.testBinaryDestinationMismatchRejected",
+            rejected.count == 2 && rejected.allSatisfy { $0.kind == "unsupported" } && noSession
+                && texts.count == 1 && texts[0].timestamp == ts + 2
+                && (try rig.unprocessed.count()) == 0,
+            "rejected=\(rejected.count) noSession=\(noSession) texts=\(texts.count)"
+        )
+    } catch {
+        check("ReceiveTests.testBinaryDestinationMismatchRejected", false, "\(error)")
+    }
+}
+
+// Placeholder rows render with a fixed, localizable-free string; a row
+// that carries its own body keeps it.
+private func testPlaceholderDisplayText() {
+    let empty = StoredMessage(rowId: 1, senderAci: "a", body: "", timestamp: 1, kind: "undecryptable")
+    let unsupportedEmpty = StoredMessage(rowId: 2, senderAci: "a", body: "", timestamp: 2, kind: "unsupported")
+    let unsupportedBody = StoredMessage(rowId: 3, senderAci: "a", body: "look", timestamp: 3, kind: "unsupported")
+    let text = StoredMessage(rowId: 4, senderAci: "a", body: "hi", timestamp: 4)
+    check(
+        "ReceiveTests.testPlaceholderDisplayText",
+        empty.displayBody == "Message could not be shown"
+            && unsupportedEmpty.displayBody == "Message could not be shown"
+            && unsupportedBody.displayBody == "look" && text.displayBody == "hi"
+    )
 }

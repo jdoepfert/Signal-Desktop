@@ -16,7 +16,7 @@ public struct StoredMessage: Sendable, Equatable {
     public let senderDevice: UInt32?
     public let expireTimer: UInt32?
     public let expiresAt: UInt64?
-    /// `text`, `unsupported` or `sent-sync`.
+    /// `text`, `unsupported`, `undecryptable` or `sent-sync`.
     public let kind: String
     /// NULL for inbound; `pending`, `sent` or `failed` for outbound.
     public let status: String?
@@ -52,6 +52,29 @@ public enum MessageKind {
     public static let text = "text"
     public static let unsupported = "unsupported"
     public static let sentSync = "sent-sync"
+    /// A message we were acked for but could not decrypt (bad MAC, no
+    /// session, malformed): a placeholder with an empty body.
+    public static let undecryptable = "undecryptable"
+
+    /// What the thread shows for a row with no text of its own (fixed
+    /// English copy; Milestone A has no localization yet).
+    public static let placeholderText = "Message could not be shown"
+
+    /// The text to render for a row.
+    public static func displayBody(kind: String, body: String) -> String {
+        if body.isEmpty, kind == unsupported || kind == undecryptable {
+            return placeholderText
+        }
+        return body
+    }
+}
+
+extension StoredMessage {
+    /// `body`, or the placeholder text for an empty unsupported or
+    /// undecryptable row.
+    public var displayBody: String {
+        MessageKind.displayBody(kind: kind, body: body)
+    }
 }
 
 /// Outbox states of an outgoing row (`messages.status`). Inbound rows have

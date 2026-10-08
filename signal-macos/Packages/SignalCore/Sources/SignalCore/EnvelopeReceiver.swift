@@ -32,7 +32,7 @@ public struct ReceivedMessage: Sendable, Equatable {
     public let body: String
     /// The sender's sent timestamp.
     public let timestamp: UInt64
-    /// `text`, `unsupported` or `sent-sync`.
+    /// `text`, `unsupported`, `undecryptable` or `sent-sync`.
     public let kind: String
     /// True for messages we sent from another device (sent-sync).
     public let isOutgoing: Bool
@@ -153,8 +153,10 @@ public actor EnvelopeReceiver {
         }
         for row in rows {
             if row.attempts >= Self.maxAttempts {
-                Self.logger.error("dropping envelope after \(row.attempts) failed attempts")
-                try? unprocessed.remove(id: row.id)
+                // Cap hit: the user gets a placeholder before the raw copy
+                // is deleted (no silent loss).
+                Self.logger.error("giving up on envelope after \(row.attempts) failed attempts")
+                dropWithPlaceholder(id: row.id, bytes: row.envelope, kind: MessageKind.undecryptable)
                 continue
             }
             handle(id: row.id, bytes: row.envelope)
@@ -204,9 +206,144 @@ public actor EnvelopeReceiver {
             Self.logger.info("dropping redelivered envelope (already decrypted)")
             try? unprocessed.remove(id: id)
         } catch {
-            // Rolled back: the row stays in `unprocessed` with its bumped
-            // attempts for the next launch's replay.
             Self.logger.error("envelope not processed: \(Self.reason(error))")
+            if let kind = Self.permanentKind(of: error) {
+                // Retrying can never help: do not leave it for three more
+                // launches, record the loss now.
+                dropWithPlaceholder(id: id, bytes: bytes, kind: kind)
+            }
+            // Otherwise (a decrypt failure that may still succeed once
+            // earlier messages arrive, or a database error): rolled back,
+            // the row stays with its bumped attempts for the next launch's
+            // replay, which writes the placeholder at the cap.
+        }
+    }
+
+    // MARK: - Failures that must leave a trace
+
+    /// Failures a retry cannot fix, mapped to the placeholder kind.
+    ///
+    /// PNI DECISION (Milestone A): an envelope addressed to our PNI is
+    /// dropped WITH a placeholder, not decrypted. The PNI identity and
+    /// prekeys are provisioned (stored under prekey id 2) but receiving to
+    /// the PNI is out of scope; a placeholder tells the user that something
+    /// arrived. Group (SENDERKEY) messages are the same: unsupported.
+    ///
+    /// Not implemented, deliberately: Desktop's DecryptionErrorMessage
+    /// retry request (asking the sender to resend after a bad MAC / missing
+    /// session). Out of scope for Milestone A; the placeholder is the only
+    /// trace, and a resend arriving later still lands normally (placeholders
+    /// are stamped with the server timestamp, never the sender's sent
+    /// timestamp, so they cannot dedupe the real message away).
+    private static func permanentKind(of error: Error) -> String? {
+        switch error {
+        case EnvelopeError.wrongDestination, EnvelopeError.unsupportedType,
+             SealedSenderHelperError.unsupportedMessageType:
+            return MessageKind.unsupported
+        case EnvelopeError.missingSource, EnvelopeError.invalidContent,
+             SealedSenderHelperError.untrustedSender, SealedSenderHelperError.unexpectedSender:
+            // Malformed content or source, or a sender certificate no trust
+            // root vouches for. NOT in this list: an envelope that does not
+            // even parse (no sender, so no placeholder is possible either)
+            // and bad padding; both keep the attempts counter like any
+            // decrypt-stage failure.
+            return MessageKind.undecryptable
+        default:
+            return nil
+        }
+    }
+
+    /// One transaction: insert the placeholder (when the sender is known)
+    /// and delete the raw copy. If the transaction fails the row stays and
+    /// the next replay (attempts >= cap) tries again.
+    private func dropWithPlaceholder(id: String, bytes: Data, kind: String) {
+        let sender = identifySender(bytes)
+        if sender == nil {
+            Self.logger.error("dropping envelope with no identifiable sender; no placeholder")
+        }
+        let timestamp = Self.placeholderTimestamp(bytes) ?? nowMs()
+        do {
+            let committed: ReceivedMessage? = try store.withTransaction { transaction in
+                var result: ReceivedMessage?
+                if let sender {
+                    let message = NewMessage(
+                        senderAci: sender.aci,
+                        senderDevice: sender.device,
+                        body: "",
+                        sentTimestamp: timestamp,
+                        target: .direct(aci: sender.aci),
+                        envelopeHash: Data(SHA256.hash(data: bytes)),
+                        kind: kind
+                    )
+                    let persisted = try messages.persist(message, in: transaction)
+                    if persisted.inserted {
+                        result = ReceivedMessage(
+                            rowId: persisted.rowId,
+                            conversationId: persisted.conversationId,
+                            senderAci: sender.aci,
+                            body: "",
+                            timestamp: timestamp,
+                            kind: kind,
+                            isOutgoing: false
+                        )
+                    }
+                }
+                try transaction.removeUnprocessed(id: id)
+                return result
+            }
+            if let committed {
+                continuation.yield(committed)
+            }
+        } catch {
+            Self.logger.error("could not write placeholder: \(Self.reason(error))")
+        }
+    }
+
+    /// Server time of arrival: never the sender's sent timestamp.
+    private static func placeholderTimestamp(_ bytes: Data) -> UInt64? {
+        guard let envelope = try? SignalServiceProtos_Envelope(serializedBytes: bytes) else {
+            return nil
+        }
+        if envelope.hasServerTimestamp, envelope.serverTimestamp != 0 {
+            return envelope.serverTimestamp
+        }
+        if envelope.hasClientTimestamp, envelope.clientTimestamp != 0 {
+            return envelope.clientTimestamp
+        }
+        return nil
+    }
+
+    /// The sender of an envelope that could not be processed, WITHOUT
+    /// decrypting its content. Plaintext envelopes name their source (the
+    /// server vouches for it); for sealed sender only the outer layer is
+    /// opened (read-only) and the certificate must validate against a trust
+    /// root, so a forged envelope cannot plant a placeholder under another
+    /// person's name.
+    private func identifySender(_ bytes: Data) -> (aci: String, device: UInt32)? {
+        guard let envelope = try? SignalServiceProtos_Envelope(serializedBytes: bytes) else {
+            return nil
+        }
+        switch envelope.type {
+        case .doubleRatchet, .prekeyMessage, .plaintextContent:
+            guard let source = try? Self.source(of: envelope) else {
+                return nil
+            }
+            return (source.aci, source.device)
+        case .unidentifiedSender:
+            guard
+                let content = try? UnidentifiedSenderMessageContent(
+                    message: envelope.content,
+                    identityStore: store,
+                    context: NullContext()
+                ),
+                (try? validateSenderCertificate(content.senderCertificate, trustRoots: trustRoots)) != nil
+            else {
+                return nil
+            }
+            let sender = content.senderCertificate.sender
+            return (sender.uuidString.lowercased(), UInt32(sender.deviceId))
+        default:
+            return nil
         }
     }
 
@@ -222,11 +359,17 @@ public actor EnvelopeReceiver {
         if envelope.type == .serverDeliveryReceipt {
             return DecodedEnvelope(message: nil, profileKey: nil)
         }
-        if envelope.hasDestinationServiceID,
+        // Addressed to our ACI? Both encodings are checked: the string and
+        // the binary one (16 raw bytes = ACI; 0x01 + 16 = PNI). A mismatch
+        // (e.g. a PNI-addressed message) is rejected before any decrypt.
+        if envelope.hasDestinationServiceID, !envelope.destinationServiceID.isEmpty,
            envelope.destinationServiceID.lowercased() != ourAci
         {
-            // Not addressed to our ACI (e.g. a PNI-addressed message): we
-            // hold no PNI session state to decrypt it with.
+            throw EnvelopeError.wrongDestination
+        }
+        if envelope.hasDestinationServiceIDBinary, !envelope.destinationServiceIDBinary.isEmpty,
+           ContentMapping.aciString(fromRaw: envelope.destinationServiceIDBinary) != ourAci
+        {
             throw EnvelopeError.wrongDestination
         }
         let context = NullContext()

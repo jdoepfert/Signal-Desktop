@@ -305,7 +305,7 @@ public final class AppState: ObservableObject {
                     await deliverNotification(
                         message: DecryptedMessage(
                             senderAci: message.senderAci,
-                            body: message.body,
+                            body: MessageKind.displayBody(kind: message.kind, body: message.body),
                             timestamp: message.timestamp
                         ),
                         conversation: conversation
@@ -350,7 +350,7 @@ public final class AppState: ObservableObject {
                     ThreadMessage(
                         rowId: $0.rowId,
                         senderAci: $0.senderAci,
-                        body: $0.body,
+                        body: $0.displayBody,
                         timestamp: $0.timestamp
                     )
                 }
