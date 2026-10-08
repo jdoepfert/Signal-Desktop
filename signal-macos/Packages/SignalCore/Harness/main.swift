@@ -62,4 +62,8 @@ await runAsync("StorageTests") {
     await runStorageTests()
 }
 
+await runAsync("RegistrationTests") {
+    await runRegistrationTests()
+}
+
 exit(checkResult())

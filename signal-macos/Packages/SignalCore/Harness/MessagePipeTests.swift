@@ -48,7 +48,8 @@ private let pipeAlice = "9d0652a3-dcc3-4d11-975f-74d61598733f"
 private let pipeBob = "6838237D-02F6-4098-B110-698253D15961"
 
 // Session + fabricated sender cert, mirroring LibsignalRoundTrip.swift.
-private struct PipeFixture {
+// Internal (not private) so other harness suites can reuse the fixture.
+struct PipeFixture {
     let aliceStore: InMemorySignalProtocolStore
     let bobStore: InMemorySignalProtocolStore
     let aliceAddress: ProtocolAddress

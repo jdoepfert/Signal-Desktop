@@ -32,6 +32,10 @@ public enum ProvisioningError: Error, Equatable {
     /// Non-staging, non-production host passed to ChatTransport. TLS pinning
     /// itself is enforced by libsignal's Rust transport.
     case untrustedHost
+    /// Empty or malformed provisioning code (rejected before any network).
+    case invalidCode
+    /// A network wait outlived its deadline.
+    case timedOut
 }
 
 /// Minimal proto2 reader: fields keyed by field number, preserving both
