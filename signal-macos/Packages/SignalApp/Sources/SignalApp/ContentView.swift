@@ -1,6 +1,7 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import AppKit
 import SwiftUI
 
 /// Root view: onboarding until linked, then the conversation split view.
@@ -48,6 +49,8 @@ public struct ContentView: View {
                 detail: "Start over to link it again.",
                 state: state
             )
+        case .couldNotStart(let message):
+            CouldNotStartView(message: message, state: state)
         case .linked:
             linkedView
         }
@@ -156,6 +159,38 @@ struct RecoveryView: View {
             Text(detail)
                 .multilineTextAlignment(.center)
             StartOverButton(state: state)
+        }
+        .padding()
+        .frame(minWidth: 320, minHeight: 240)
+    }
+}
+
+/// Launch hit a retryable problem (keychain prompt refused, database busy):
+/// Retry changes nothing on disk. There is deliberately no "Start over"
+/// here.
+struct CouldNotStartView: View {
+    let message: String
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Couldn't start Signal")
+                .font(.headline)
+            Text(message)
+                .multilineTextAlignment(.center)
+            Text("Your data has not been changed.")
+                .font(.caption)
+            HStack {
+                Button("Retry") {
+                    Task {
+                        await state.retry()
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                Button("Quit") {
+                    NSApplication.shared.terminate(nil)
+                }
+            }
         }
         .padding()
         .frame(minWidth: 320, minHeight: 240)

@@ -12,10 +12,16 @@ struct KeychainDatabaseKeyStore: DatabaseKeyStore {
     let account: String
 
     func loadKey() throws -> String? {
-        guard let data = try KeychainStore.load(service: Self.service, account: account) else {
-            return nil
+        do {
+            guard let data = try KeychainStore.load(service: Self.service, account: account) else {
+                return nil
+            }
+            return String(data: data, encoding: .utf8)
+        } catch KeychainError.denied {
+            // The user answered Deny on the keychain prompt (or the
+            // keychain is locked): a retryable launch failure.
+            throw DatabaseKeyStoreError.accessDenied
         }
-        return String(data: data, encoding: .utf8)
     }
 
     func saveKey(_ key: String) throws {

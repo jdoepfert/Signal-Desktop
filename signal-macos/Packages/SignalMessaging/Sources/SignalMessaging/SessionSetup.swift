@@ -75,6 +75,12 @@ extension LivePreKeyService: PreKeyBundleFetching {
             } catch SignalError.requestUnauthorized {
                 // Stale or wrong profile key: not an error, fall through.
                 Self.logger.info("prekey fetch: access key refused (401/403); trying authenticated")
+            } catch where UnauthChat.isConnectionLoss(error) {
+                // The unauthenticated socket is unusable (even after the
+                // provider's one reconnect): use our own authenticated socket.
+                Self.logger.info(
+                    "prekey fetch: unauthenticated socket unusable (\(ErrorReason.describe(error))); trying authenticated"
+                )
             } catch {
                 Self.logger.error("prekey fetch (access key) failed: \(ErrorReason.describe(error))")
                 throw error

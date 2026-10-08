@@ -26,3 +26,13 @@ public func mapDatabaseOpenError(_ error: Error) -> DatabaseOpenError {
     }
     return .corruptStore
 }
+
+/// True when another connection or process holds the database
+/// (SQLITE_BUSY / SQLITE_LOCKED): a retry later can succeed.
+public func isDatabaseBusy(_ error: Error) -> Bool {
+    guard let dbError = error as? DatabaseError else {
+        return false
+    }
+    return dbError.resultCode == .SQLITE_BUSY || dbError.resultCode == .SQLITE_LOCKED
+        || dbError.extendedResultCode == .SQLITE_BUSY || dbError.extendedResultCode == .SQLITE_LOCKED
+}

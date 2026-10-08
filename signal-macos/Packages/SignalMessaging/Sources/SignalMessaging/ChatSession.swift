@@ -267,6 +267,31 @@ public actor ChatSession {
         }
     }
 
+    /// First connect, retried with the reconnect backoff while the network
+    /// is down (`onOffline` gets the zero-based attempt number each time a
+    /// try fails). Returns once connected. Rejected credentials end it at
+    /// once with `deviceUnlinked`; cancellation ends it with an error.
+    public func connectRetrying(
+        credentials: DeviceCredentials,
+        onOffline: @Sendable (Int) -> Void
+    ) async throws {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                try await connect(credentials: credentials)
+                return
+            } catch ChatSessionError.deviceUnlinked {
+                throw ChatSessionError.deviceUnlinked
+            } catch {
+                try Task.checkCancellation()
+                onOffline(attempt)
+                try await reconnectDelay(attempt)
+                attempt += 1
+            }
+        }
+    }
+
     public nonisolated func incoming() -> AsyncStream<IncomingEnvelope> {
         stream
     }

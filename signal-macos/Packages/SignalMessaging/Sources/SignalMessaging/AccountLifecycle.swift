@@ -16,6 +16,14 @@ public protocol DatabaseKeyStore: Sendable {
     func deleteKey() throws
 }
 
+/// Key-store failures the lifecycle understands.
+public enum DatabaseKeyStoreError: Error, Equatable {
+    /// The system refused access to the stored key (the user answered Deny
+    /// on the keychain prompt, or the keychain is locked). Retrying asks
+    /// again; the data is intact.
+    case accessDenied
+}
+
 /// Process-local key store for tests and previews.
 public final class InMemoryDatabaseKeyStore: DatabaseKeyStore, @unchecked Sendable {
     private let lock = NSLock()
@@ -48,6 +56,35 @@ public enum LaunchState: Sendable, Equatable {
     /// damaged file). The old files are left untouched until the user
     /// chooses "Start over".
     case needsReLink(reason: String)
+    /// Launch could not finish for a reason a retry can fix (keychain
+    /// prompt refused, database busy). Nothing was changed or deleted; the
+    /// UI offers Retry, never "Start over".
+    case transientFailure(reason: TransientLaunchReason)
+}
+
+public enum TransientLaunchReason: Sendable, Equatable {
+    /// The keychain refused to hand over the database key.
+    case keychainDenied
+    /// The keychain failed in some other way.
+    case keychainUnavailable
+    /// Another process holds the database (SQLITE_BUSY / LOCKED).
+    case databaseBusy
+    /// The database could not be opened or read for another reason.
+    case databaseUnavailable
+
+    /// Plain-language text for the "Couldn't start" screen.
+    public var message: String {
+        switch self {
+        case .keychainDenied:
+            return "Signal needs access to its encryption key in the keychain, and access was denied. Choose Retry and answer \"Always Allow\"."
+        case .keychainUnavailable:
+            return "The keychain could not be read."
+        case .databaseBusy:
+            return "The Signal database is in use. Is another copy of Signal for Mac running?"
+        case .databaseUnavailable:
+            return "The Signal database could not be opened."
+        }
+    }
 }
 
 public enum AccountLifecycleError: Error, Equatable {
@@ -65,6 +102,7 @@ public actor AccountLifecycle {
     private let databasePath: String
     private let keys: any DatabaseKeyStore
     private let environment: Net.Environment
+    private let openDatabase: @Sendable (String, String) throws -> SignalDatabase
     private var openedDatabase: SignalDatabase?
 
     private static let logger = Logger(subsystem: "lifecycle", category: "account")
@@ -72,11 +110,15 @@ public actor AccountLifecycle {
     public init(
         databasePath: String,
         keys: any DatabaseKeyStore,
-        environment: Net.Environment
+        environment: Net.Environment,
+        openDatabase: @escaping @Sendable (String, String) throws -> SignalDatabase = {
+            try SignalDatabase.open(path: $0, key: $1)
+        }
     ) {
         self.databasePath = databasePath
         self.keys = keys
         self.environment = environment
+        self.openDatabase = openDatabase
     }
 
     /// The database opened by `launch` (restored) or `databaseForLinking`.
@@ -87,7 +129,10 @@ public actor AccountLifecycle {
     /// Decides the launch state. Never writes to an existing database
     /// file other than the schema migration a successful open performs,
     /// and never creates a key.
-    public func launch() throws -> LaunchState {
+    public func launch() -> LaunchState {
+        // A retry starts from scratch: drop the handle of an earlier,
+        // abandoned attempt before opening the file again.
+        openedDatabase = nil
         let fileExists = FileManager.default.fileExists(atPath: databasePath)
         guard fileExists else {
             Self.logger.info("launch: no database, fresh install")
@@ -97,10 +142,13 @@ public actor AccountLifecycle {
         do {
             key = try keys.loadKey()
         } catch {
-            // Keychain refused (locked, denied): not "missing". Surface it
-            // rather than offering a reset that would destroy data.
+            // Keychain refused (locked, denied): not "missing". A retry can
+            // fix it, a reset would destroy data.
             Self.logger.error("launch: key store unreadable (\(type(of: error)))")
-            throw error
+            if let storeError = error as? DatabaseKeyStoreError, storeError == .accessDenied {
+                return .transientFailure(reason: .keychainDenied)
+            }
+            return .transientFailure(reason: .keychainUnavailable)
         }
         guard let key else {
             Self.logger.error("launch: database present but key missing")
@@ -110,7 +158,7 @@ public actor AccountLifecycle {
         }
         let database: SignalDatabase
         do {
-            database = try SignalDatabase.open(path: databasePath, key: key)
+            database = try openDatabase(databasePath, key)
         } catch {
             switch mapDatabaseOpenError(error) {
             case .needsReLink:
@@ -120,7 +168,9 @@ public actor AccountLifecycle {
                 )
             case .corruptStore:
                 Self.logger.error("launch: database open failed (\(type(of: error)))")
-                throw AccountLifecycleError.databaseUnavailable
+                return .transientFailure(
+                    reason: isDatabaseBusy(error) ? .databaseBusy : .databaseUnavailable
+                )
             }
         }
         let account: StoredAccount?
@@ -128,13 +178,20 @@ public actor AccountLifecycle {
             account = try AccountTable(queue: database.queue).loadAny()
         } catch {
             Self.logger.error("launch: account read failed (\(type(of: error)))")
-            throw AccountLifecycleError.databaseUnavailable
+            return .transientFailure(
+                reason: isDatabaseBusy(error) ? .databaseBusy : .databaseUnavailable
+            )
         }
         guard let account else {
             // An unfinished or rejected link attempt: no credentials, so
             // nothing in here can be used. Start the next link clean.
             Self.logger.info("launch: database has no account, discarding it")
-            try removeDatabaseFiles()
+            do {
+                try removeDatabaseFiles()
+            } catch {
+                Self.logger.error("launch: discarding the empty database failed (\(type(of: error)))")
+                return .transientFailure(reason: .databaseUnavailable)
+            }
             return .needsLink
         }
         openedDatabase = database
@@ -168,7 +225,7 @@ public actor AccountLifecycle {
         }
         let directory = URL(fileURLWithPath: databasePath).deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let database = try SignalDatabase.open(path: databasePath, key: key)
+        let database = try openDatabase(databasePath, key)
         openedDatabase = database
         return database
     }

@@ -363,6 +363,7 @@ func runSendTests() async {
     await testFirstContactWithoutProfileKeyUsesAuthenticatedFetch()
     await testUnauthorizedAccessKeyFetchFallsBackToAuthenticated()
     await testAuthenticatedFetchStatusMapping()
+    await testUnauthFailureFallsBackToAuthenticatedPrekeyFetch()
     await testChangedIdentitySendThrowsIdentityChanged()
     await testAcceptNewIdentityThenSendSucceeds()
     await testResendAfterAcceptKeepsOneRow()
@@ -1130,6 +1131,36 @@ private func testUnauthorizedAccessKeyFetchFallsBackToAuthenticated() async {
         )
     } catch {
         check("SendTests.testUnauthorizedAccessKeyFetchFallsBackToAuthenticated", false, "\(error)")
+    }
+}
+
+// I2: an access-key fetch that cannot use the unauthenticated socket at all
+// (connection lost, reconnect failing) still succeeds over the authenticated
+// request instead of failing the send.
+private func testUnauthFailureFallsBackToAuthenticatedPrekeyFetch() async {
+    do {
+        let holder = Box<FakeKeysEndpoint?>(nil)
+        let connector = FakeUnauthConnector { _ in
+            FakeUnauthConnection(alwaysFail: SignalError.connectionFailed("offline"))
+        }
+        let f = try makeFixture(unestablished: [], knownProfileKey: true, presession: false) { source in
+            let endpoint = FakeKeysEndpoint(source: source)
+            holder.value = endpoint
+            return LivePreKeyService(
+                keys: UnauthChat(connector: connector),
+                authenticatedSend: { try await endpoint.send($0) }
+            )
+        }
+        let endpoint = holder.value!
+        _ = try await f.sender.send(textContent("hello", 1_700_000_100_009), to: theirAci, timestamp: 1_700_000_100_009)
+        let active = try activeDevices(f)
+        try checkT(
+            "SendTests.testUnauthFailureFallsBackToAuthenticatedPrekeyFetch",
+            endpoint.requests.count == 1 && active == [1, 2, 3] && f.submitter.requests.count == 1,
+            "auth=\(endpoint.requests.count) active=\(active)"
+        )
+    } catch {
+        check("SendTests.testUnauthFailureFallsBackToAuthenticatedPrekeyFetch", false, "\(error)")
     }
 }
 

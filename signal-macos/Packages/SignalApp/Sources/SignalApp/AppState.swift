@@ -17,6 +17,7 @@ private struct LiveStack {
     let sender: OutgoingSender
     let receiver: EnvelopeReceiver
     let chat: ChatSession
+    let unauth: UnauthChat
     let conversations: ConversationStore
     let contacts: ContactStore
     let messages: MessageStore
@@ -33,6 +34,9 @@ public enum AppPhase: Equatable, Sendable {
     case linked
     /// The phone removed this device; offers "Start over".
     case unlinked
+    /// Launch hit something a retry can fix (keychain prompt refused,
+    /// database busy). Offers Retry; never offers "Start over".
+    case couldNotStart(message: String)
 }
 
 /// A send refused because the contact's safety number changed; the user
@@ -108,35 +112,50 @@ public final class AppState: ObservableObject {
     }
 
     /// Launch decision: restore a linked account, start the QR flow, or
-    /// explain why stored data cannot be used. Runs once; further calls
-    /// are ignored.
+    /// explain why stored data cannot be used. Runs once per attempt;
+    /// further calls while one is running are ignored.
     public func start() async {
         guard phase == .starting, !launching else {
             return
         }
         launching = true
         defer { launching = false }
-        do {
-            switch try await lifecycle.launch() {
-            case .needsLink:
-                beginLink()
-            case .restored(let credentials):
-                guard let database = await lifecycle.database else {
-                    throw AccountLifecycleError.databaseUnavailable
-                }
-                let netEnv = Self.netEnvironment(environment)
-                let net = Net(env: netEnv, userAgent: "signal-macos/0.0.0", buildVariant: .production)
-                let unauth = try await net.connectUnauthenticatedChat()
-                try await assemble(credentials: credentials, database: database, unauth: unauth)
-            case .needsReLink(let reason):
-                phase = .needsReLink(reason: reason)
+        switch await lifecycle.launch() {
+        case .needsLink:
+            beginLink()
+        case .restored(let credentials):
+            guard let database = await lifecycle.database else {
+                phase = .couldNotStart(message: TransientLaunchReason.databaseUnavailable.message)
+                return
             }
-        } catch {
-            Self.logger.error("start failed (\(type(of: error)))")
-            phase = .needsReLink(
-                reason: "Signal data on this Mac could not be opened (\(type(of: error)))."
-            )
+            // No network yet: the unauthenticated socket connects lazily on
+            // first use, and the authenticated one retries in the
+            // background, so an offline launch still opens the app.
+            let unauth = UnauthChat.live(net: Self.makeNet(environment))
+            do {
+                try await assemble(credentials: credentials, database: database, unauth: unauth)
+            } catch {
+                Self.logger.error("start failed (\(ErrorReason.describe(error)))")
+                phase = .couldNotStart(
+                    message: "Signal could not start (\(ErrorReason.describe(error)))."
+                )
+            }
+        case .needsReLink(let reason):
+            phase = .needsReLink(reason: reason)
+        case .transientFailure(let reason):
+            Self.logger.error("start deferred: \(String(describing: reason))")
+            phase = .couldNotStart(message: reason.message)
         }
+    }
+
+    /// "Retry" on the could-not-start screen: nothing was changed, so just
+    /// launch again.
+    public func retry() async {
+        guard case .couldNotStart = phase else {
+            return
+        }
+        phase = .starting
+        await start()
     }
 
     /// "Start over": stops everything, deletes the local database and its
@@ -154,6 +173,7 @@ public final class AppState: ObservableObject {
         pumpTask = nil
         if let stack {
             await stack.chat.disconnect()
+            await stack.unauth.disconnect()
         }
         stack = nil
         conversations = []
@@ -327,6 +347,10 @@ public final class AppState: ObservableObject {
         }
     }
 
+    private static func makeNet(_ environment: AppEnvironment) -> Net {
+        Net(env: netEnvironment(environment), userAgent: "signal-macos/0.0.0", buildVariant: .production)
+    }
+
     private static func netEnvironment(_ environment: AppEnvironment) -> Net.Environment {
         environment == .production ? .production : .staging
     }
@@ -335,8 +359,8 @@ public final class AppState: ObservableObject {
     /// restore builds.
     private func registerAndBuild(account: ProvisionedAccount) async throws {
         let netEnv = Self.netEnvironment(environment)
-        let net = Net(env: netEnv, userAgent: "signal-macos/0.0.0", buildVariant: .production)
-        let unauth = try await net.connectUnauthenticatedChat()
+        // Connects (and starts the connection) lazily at the link PUT.
+        let unauth = UnauthChat.live(net: Self.makeNet(environment))
         let database = try await lifecycle.databaseForLinking()
         let identityStore = GRDBIdentityStore(queue: database.queue)
         let sessionStore = GRDBSessionStore(queue: database.queue)
@@ -347,7 +371,7 @@ public final class AppState: ObservableObject {
             senderKeys: senderKeys
         )
         let registration = LinkedDeviceRegistration(
-            transport: LiveRegistrationTransport(connection: unauth),
+            transport: LiveRegistrationTransport(chat: unauth),
             store: protocolStore,
             identityStore: identityStore,
             accounts: AccountTable(queue: database.queue)
@@ -362,7 +386,7 @@ public final class AppState: ObservableObject {
     private func assemble(
         credentials creds: DeviceCredentials,
         database: SignalDatabase,
-        unauth: UnauthenticatedChatConnection
+        unauth: UnauthChat
     ) async throws {
         let identityStore = GRDBIdentityStore(queue: database.queue)
         let sessionStore = GRDBSessionStore(queue: database.queue)
@@ -438,6 +462,7 @@ public final class AppState: ObservableObject {
             sender: sender,
             receiver: receiver,
             chat: chat,
+            unauth: unauth,
             conversations: conversations,
             contacts: contacts,
             messages: messages
@@ -473,19 +498,17 @@ public final class AppState: ObservableObject {
         credentials: DeviceCredentials,
         sender: OutgoingSender
     ) async {
-        var attempt = 0
-        while !Task.isCancelled {
-            do {
-                try await chat.connect(credentials: credentials)
-                error = nil
-                break
-            } catch ChatSessionError.deviceUnlinked {
-                return
-            } catch {
-                self.error = "Can't reach Signal. Retrying\u{2026}"
-                try? await ChatSession.defaultDelay(attempt: attempt)
-                attempt += 1
+        do {
+            try await chat.connectRetrying(credentials: credentials) { _ in
+                Task { @MainActor in
+                    self.error = "Can't reach Signal. Retrying\u{2026}"
+                }
             }
+            self.error = nil
+        } catch {
+            // Rejected credentials (the state stream reports them) or
+            // cancellation: nothing more to do here.
+            return
         }
         if Task.isCancelled {
             return

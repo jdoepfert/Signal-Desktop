@@ -132,6 +132,15 @@ extension LiveTransport: MessageSubmitter {
                 )
                 return .ok
             } catch {
+                if UnauthChat.isConnectionLoss(error), authenticatedSend != nil {
+                    // The unauthenticated socket is unusable even after the
+                    // provider's reconnect: report "sealed path refused" so
+                    // the sender fails over to an authenticated send.
+                    Self.logger.error(
+                        "sealed send could not use the unauthenticated socket (\(ErrorReason.describe(error))); failing over"
+                    )
+                    return .unauthorized
+                }
                 return try Self.submitResult(forLibsignalError: error)
             }
         case .authenticated:

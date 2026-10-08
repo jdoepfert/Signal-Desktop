@@ -6,6 +6,7 @@ import LibSignalClient
 import SignalCore
 import SignalMessaging
 import SignalStorage
+import GRDB
 
 private func tempDir() throws -> URL {
     let dir = FileManager.default.temporaryDirectory
@@ -59,7 +60,164 @@ private func makeLinkedDatabase(path: String, key: String) throws {
     )
 }
 
+/// Key store whose reads fail the way the keychain does.
+private struct FailingKeyStore: DatabaseKeyStore {
+    let error: Error
+    func loadKey() throws -> String? { throw error }
+    func saveKey(_ key: String) throws {}
+    func deleteKey() throws {}
+}
+
+private struct KeychainBoom: Error {}
+
+// I1: only a missing or rejected key offers "Start over". Everything that a
+// retry can fix (keychain prompt refused, database busy, offline) is a
+// transient failure and never leads to deleting data.
+private func runTransientLaunchTests() async {
+    func isTransient(_ state: LaunchState?) -> TransientLaunchReason? {
+        if case .transientFailure(let reason)? = state {
+            return reason
+        }
+        return nil
+    }
+    func offersReset(_ state: LaunchState?) -> Bool {
+        if case .needsReLink? = state {
+            return true
+        }
+        return false
+    }
+
+    // The keychain read is denied by the user: transient, files untouched.
+    do {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appending(path: "db.sqlite").path
+        try makeLinkedDatabase(path: path, key: "k")
+        let before = try Data(contentsOf: URL(fileURLWithPath: path))
+        let lifecycle = AccountLifecycle(
+            databasePath: path,
+            keys: FailingKeyStore(error: DatabaseKeyStoreError.accessDenied),
+            environment: .production
+        )
+        let state = await lifecycle.launch()
+        let after = try Data(contentsOf: URL(fileURLWithPath: path))
+        check(
+            "LifecycleTests.testKeychainDeniedIsTransient",
+            isTransient(state) == .keychainDenied && !offersReset(state) && before == after,
+            "\(String(describing: state))"
+        )
+        // Any other keychain failure is also retryable, never a reset.
+        let other = AccountLifecycle(
+            databasePath: path,
+            keys: FailingKeyStore(error: KeychainBoom()),
+            environment: .production
+        )
+        let otherState = await other.launch()
+        check(
+            "LifecycleTests.testKeychainErrorIsTransient",
+            isTransient(otherState) != nil && !offersReset(otherState),
+            "\(String(describing: otherState))"
+        )
+    } catch {
+        check("LifecycleTests.testKeychainDeniedIsTransient", false, "\(error)")
+    }
+
+    // A busy/locked database (second instance) is transient; so is any
+    // other open failure. Neither deletes the file or offers Start over.
+    do {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appending(path: "db.sqlite").path
+        try makeLinkedDatabase(path: path, key: "k")
+        let before = try Data(contentsOf: URL(fileURLWithPath: path))
+        let busy = AccountLifecycle(
+            databasePath: path,
+            keys: InMemoryDatabaseKeyStore(key: "k"),
+            environment: .production,
+            openDatabase: { _, _ in throw DatabaseError(resultCode: .SQLITE_BUSY) }
+        )
+        let busyState = await busy.launch()
+        let io = AccountLifecycle(
+            databasePath: path,
+            keys: InMemoryDatabaseKeyStore(key: "k"),
+            environment: .production,
+            openDatabase: { _, _ in throw DatabaseError(resultCode: .SQLITE_IOERR) }
+        )
+        let ioState = await io.launch()
+        // A rejected key is still the reset case.
+        let rejected = AccountLifecycle(
+            databasePath: path,
+            keys: InMemoryDatabaseKeyStore(key: "k"),
+            environment: .production,
+            openDatabase: { _, _ in throw DatabaseError(resultCode: .SQLITE_NOTADB) }
+        )
+        let rejectedState = await rejected.launch()
+        let after = try Data(contentsOf: URL(fileURLWithPath: path))
+        check(
+            "LifecycleTests.testTransientErrorDoesNotOfferReset",
+            isTransient(busyState) == .databaseBusy && !offersReset(busyState)
+                && isTransient(ioState) == .databaseUnavailable && !offersReset(ioState)
+                && offersReset(rejectedState) && before == after,
+            "busy=\(String(describing: busyState)) io=\(String(describing: ioState)) rejected=\(String(describing: rejectedState))"
+        )
+    } catch {
+        check("LifecycleTests.testTransientErrorDoesNotOfferReset", false, "\(error)")
+    }
+
+    // Offline at launch: the restore itself needs no network, and the first
+    // connect keeps retrying with backoff until it succeeds.
+    do {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appending(path: "db.sqlite").path
+        try makeLinkedDatabase(path: path, key: "k")
+        let lifecycle = AccountLifecycle(
+            databasePath: path,
+            keys: InMemoryDatabaseKeyStore(key: "k"),
+            environment: .production
+        )
+        let state = await lifecycle.launch()
+        guard case .restored(let credentials) = state else {
+            check("LifecycleTests.testOfflineRestoreRetries", false, "\(state)")
+            return
+        }
+        let connector = ScriptedAuthConnector(script: [
+            SignalError.connectionFailed("offline"), SignalError.connectionFailed("offline"), nil,
+        ])
+        let delays = Box<[Int]>([])
+        let offline = Box<[Int]>([])
+        let session = ChatSession(connector: connector, reconnectDelay: { attempt in
+            delays.value.append(attempt)
+        })
+        try await session.connectRetrying(credentials: credentials, onOffline: { offline.value.append($0) })
+        let connected = await session.state
+        // Rejected credentials end the loop at once.
+        let rejecting = ScriptedAuthConnector(script: [SignalError.requestUnauthorized("403")])
+        let session2 = ChatSession(connector: rejecting, reconnectDelay: { _ in })
+        var terminal = false
+        do {
+            try await session2.connectRetrying(credentials: credentials, onOffline: { _ in })
+        } catch ChatSessionError.deviceUnlinked {
+            terminal = true
+        }
+        check(
+            "LifecycleTests.testOfflineRestoreRetries",
+            // The scripted socket drops at once, so the session's own
+            // reconnect pump may add later opens/delays: only the first
+            // connect's three opens and two backoffs are asserted.
+            connector.opens >= 3 && Array(delays.value.prefix(2)) == [0, 1]
+                && offline.value == [0, 1] && connected != .deviceUnlinked && terminal
+                && rejecting.opens == 1,
+            "rejecting=\(rejecting.opens) opens=\(connector.opens) delays=\(delays.value) offline=\(offline.value) state=\(connected) terminal=\(terminal)"
+        )
+        await session.disconnect()
+    } catch {
+        check("LifecycleTests.testOfflineRestoreRetries", false, "\(error)")
+    }
+}
+
 func runLifecycleTests() async {
+    await runTransientLaunchTests()
     // Linked account + key present: restored without any link step.
     do {
         let dir = try tempDir()
@@ -71,7 +229,7 @@ func runLifecycleTests() async {
             keys: InMemoryDatabaseKeyStore(key: "k"),
             environment: .production
         )
-        let state = try await lifecycle.launch()
+        let state = await lifecycle.launch()
         let hasDatabase = await lifecycle.database != nil
         check(
             "LifecycleTests.testRestoresWithoutRelink",
@@ -100,7 +258,7 @@ func runLifecycleTests() async {
         let before = try Data(contentsOf: URL(fileURLWithPath: path))
         let keys = InMemoryDatabaseKeyStore()
         let lifecycle = AccountLifecycle(databasePath: path, keys: keys, environment: .production)
-        let state = try await lifecycle.launch()
+        let state = await lifecycle.launch()
         var linkingRefused = false
         do {
             _ = try await lifecycle.databaseForLinking()
@@ -129,7 +287,7 @@ func runLifecycleTests() async {
         let path = dir.appending(path: "db.sqlite").path
         let keys = InMemoryDatabaseKeyStore()
         let lifecycle = AccountLifecycle(databasePath: path, keys: keys, environment: .staging)
-        let state = try await lifecycle.launch()
+        let state = await lifecycle.launch()
         let keyBefore = try keys.loadKey()
         check(
             "LifecycleTests.testFreshInstallNeedsLink",
@@ -160,7 +318,7 @@ func runLifecycleTests() async {
             keys: InMemoryDatabaseKeyStore(key: "k"),
             environment: .staging
         )
-        let state = try await lifecycle.launch()
+        let state = await lifecycle.launch()
         check(
             "LifecycleTests.testDatabaseWithoutAccountStartsClean",
             state == .needsLink && !FileManager.default.fileExists(atPath: path),
@@ -183,7 +341,7 @@ func runLifecycleTests() async {
             keys: InMemoryDatabaseKeyStore(key: "wrong"),
             environment: .production
         )
-        let state = try await lifecycle.launch()
+        let state = await lifecycle.launch()
         var isReLink = false
         if case .needsReLink = state {
             isReLink = true
@@ -206,7 +364,7 @@ func runLifecycleTests() async {
         try Data([1]).write(to: URL(fileURLWithPath: path + "-shm"))
         let keys = InMemoryDatabaseKeyStore(key: "k")
         let lifecycle = AccountLifecycle(databasePath: path, keys: keys, environment: .production)
-        _ = try await lifecycle.launch()
+        _ = await lifecycle.launch()
         try await lifecycle.reset()
         let fm = FileManager.default
         let gone =
@@ -214,7 +372,7 @@ func runLifecycleTests() async {
             && !fm.fileExists(atPath: path + "-shm")
         let noKey = (try keys.loadKey()) == nil
         let noHandle = await lifecycle.database == nil
-        let state = try await lifecycle.launch()
+        let state = await lifecycle.launch()
         check(
             "LifecycleTests.testResetRemovesDatabaseAndKey",
             gone && noKey && noHandle && state == .needsLink,

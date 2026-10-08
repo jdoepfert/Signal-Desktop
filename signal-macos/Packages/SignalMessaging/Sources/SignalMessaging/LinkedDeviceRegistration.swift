@@ -23,20 +23,19 @@ public protocol RegistrationTransport: Sendable {
 
 /// Live `RegistrationTransport` over an unauthenticated chat connection
 /// (registration precedes credentials by definition).
-public final class LiveRegistrationTransport: RegistrationTransport, @unchecked Sendable {
-    private let connection: UnauthenticatedChatConnection
+public final class LiveRegistrationTransport: RegistrationTransport, Sendable {
+    private let chat: UnauthChat
 
-    public init(connection: UnauthenticatedChatConnection) {
-        self.connection = connection
+    public init(chat: UnauthChat) {
+        self.chat = chat
     }
 
     public func put(path: String, headers: [String: String], body: Data) async throws -> (
         status: UInt16, body: Data
     ) {
-        let response = try await connection.send(
+        try await chat.sendRequest(
             ChatRequest(method: "PUT", pathAndQuery: path, headers: headers, body: body, timeout: 30)
         )
-        return (response.status, response.body)
     }
 }
 
