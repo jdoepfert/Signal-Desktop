@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "name": "body-timestamp-expire-profilekey",
+      "body": "Hello from Desktop",
+      "timestamp": 1700000000123,
+      "expireTimer": 3600,
+      "profileKey": "1059b6b4d2b7c939ed34149eb18d2c3216250eba85aac8d8f56f8507cd45210d",
+      "dataMessage": "0a1248656c6c6f2066726f6d204465736b746f7028901c32201059b6b4d2b7c939ed34149eb18d2c3216250eba85aac8d8f56f8507cd45210d38fbd095ffbc31",
+      "content": "0a400a1248656c6c6f2066726f6d204465736b746f7028901c32201059b6b4d2b7c939ed34149eb18d2c3216250eba85aac8d8f56f8507cd45210d38fbd095ffbc31"
+    },
+    {
+      "name": "body-only",
+      "body": "plain",
+      "timestamp": 1700000000123,
+      "dataMessage": "0a05706c61696e38fbd095ffbc31",
+      "content": "0a0e0a05706c61696e38fbd095ffbc31"
+    },
+    {
+      "name": "reaction-unsupported",
+      "emoji": "👍",
+      "timestamp": 1700000000124,
+      "targetSentTimestamp": 1700000000123,
+      "dataMessage": "38fcd095ffbc318201210a04f09f918d100028fbd095ffbc31321011111111222243338444555555555555",
+      "content": "0a2b38fcd095ffbc318201210a04f09f918d100028fbd095ffbc31321011111111222243338444555555555555"
+    }
+  ]
+}

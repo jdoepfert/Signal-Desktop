@@ -77,6 +77,7 @@ let package = Package(
                 "SignalLogging",
             ] + cryptoProducts,
             path: "Packages/SignalCore/Harness",
+            exclude: ["Vectors"],
             linkerSettings: [
                 // libsignal's own manifest links stdc++ on Linux.
                 .linkedLibrary("c++", .when(platforms: [.macOS])),

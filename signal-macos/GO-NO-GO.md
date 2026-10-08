@@ -250,3 +250,13 @@ vectors from Desktop's stack and closed by a live checkpoint on the
 owner's phone. The "Phase 3 tasks carried over" list above is re-homed:
 fan-out, GRDB fork and provisioning fixtures go to A; group sync and
 attachments to B; thumbnails to C; RingRTC cfg to D; backup to G.
+
+## Milestone A findings
+
+- Net environment probe: `Net.Environment` is a closed two-case enum
+  (`staging`, `production`; `third-party/libsignal/swift/Sources/LibSignalClient/Net.swift:15-24`)
+  that is passed to the FFI as `env.rawValue` (`Net.swift:472-474`), and
+  `Net.init` takes no host or certificate (`Net.swift:61-66`); the only
+  override is `setProxy`, whose `UNENCRYPTED_FOR_TESTING` user is explicitly
+  "not a stable feature" (`Net.swift:118-120`). Decision: no mock-server lane;
+  vectors plus live checkpoints only.

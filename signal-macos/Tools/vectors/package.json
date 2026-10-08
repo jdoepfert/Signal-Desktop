@@ -1,0 +1,12 @@
+{
+  "name": "signal-macos-vectors",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Golden vector generator using Signal Desktop's libsignal",
+  "scripts": { "generate": "node generate.mjs" },
+  "dependencies": {
+    "@signalapp/libsignal-client": "0.103.0",
+    "protobufjs": "7.4.0"
+  }
+}

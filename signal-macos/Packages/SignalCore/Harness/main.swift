@@ -107,4 +107,12 @@ await runAsync("MessagingTests") {
     await runStandaloneRegistrationTests()
 }
 
+run("VectorTests") {
+    check(
+        "VectorTests.testLoadsAll",
+        ["padding", "provisioning", "envelopes", "access-key", "content"]
+            .allSatisfy { (try? Vectors.load($0)) != nil }
+    )
+}
+
 exit(checkResult())
