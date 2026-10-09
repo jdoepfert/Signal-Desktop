@@ -19,7 +19,39 @@ rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
 (cd "$ROOT" && swift build -c release --product SignalMac $SWIFT_FLAGS)
-cp "$ROOT/.build/release/SignalMac" "$CONTENTS/MacOS/"
+BIN_PATH=$(cd "$ROOT" && swift build -c release --product SignalMac --show-bin-path $SWIFT_FLAGS)
+cp "$BIN_PATH/SignalMac" "$CONTENTS/MacOS/"
+EXE="$CONTENTS/MacOS/SignalMac"
+
+# Embed dynamic frameworks the executable links via @rpath (SwiftPM binary
+# targets such as SQLCipher.framework are not copied into the bundle for us;
+# without this the app aborts at launch with "Library not loaded").
+mkdir -p "$CONTENTS/Frameworks"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$EXE" 2>/dev/null || true
+embedded=""
+embed_frameworks() {
+    # $1: binary to scan. Copies every @rpath/<Name>.framework it needs.
+    otool -L "$1" | awk '/@rpath\/.*\.framework\//{print $1}' | while read -r dep; do
+        name=$(printf '%s' "$dep" | sed -e 's|@rpath/||' -e 's|\.framework/.*|.framework|')
+        [ -d "$CONTENTS/Frameworks/$name" ] && continue
+        src=$(find "$BIN_PATH" "$BIN_PATH/PackageFrameworks" "$ROOT/.build" \
+            -maxdepth 6 -type d -name "$name" 2>/dev/null | head -n 1)
+        if [ -z "$src" ]; then
+            echo "error: cannot find $name to embed (needed by $1)" >&2
+            exit 1
+        fi
+        cp -R "$src" "$CONTENTS/Frameworks/"
+        echo "embedded $name from $src"
+    done
+}
+# Two passes so frameworks that depend on other frameworks are covered.
+embed_frameworks "$EXE"
+for fw in "$CONTENTS"/Frameworks/*.framework; do
+    [ -e "$fw" ] || continue
+    bin="$fw/Versions/A/$(basename "$fw" .framework)"
+    [ -f "$bin" ] || bin="$fw/$(basename "$fw" .framework)"
+    [ -f "$bin" ] && embed_frameworks "$bin"
+done
 
 VERSION=$(date -u +%Y.%m.%d)
 cat > "$CONTENTS/Info.plist" << EOF
@@ -49,5 +81,16 @@ cat > "$CONTENTS/Info.plist" << EOF
 </plist>
 EOF
 
-codesign --force --deep --sign - "$APP"
+# Sign inside-out: frameworks first, then the app.
+for fw in "$CONTENTS"/Frameworks/*.framework; do
+    [ -e "$fw" ] || continue
+    codesign --force --sign - "$fw"
+done
+codesign --force --sign - "$APP"
+
+# Verify every @rpath library resolves inside the bundle.
+if otool -L "$EXE" | awk '/@rpath\//{print $1}' | while read -r dep; do
+    rel=$(printf '%s' "$dep" | sed 's|@rpath/||')
+    [ -e "$CONTENTS/Frameworks/$rel" ] || { echo "missing in bundle: $rel" >&2; exit 1; }
+done; then :; else exit 1; fi
 echo "built $APP"

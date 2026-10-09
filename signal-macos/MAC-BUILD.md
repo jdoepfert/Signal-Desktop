@@ -217,3 +217,12 @@ Pick the part that matches:
    The log is safe to paste: it is redacted by design. Read it once before
    you send it; if you see anything that looks like a number, a name or a key,
    tell me, that is a bug.
+
+
+## If the app aborts at launch with "Library not loaded"
+
+`Tools/build-app.sh` embeds the dynamic frameworks the app links (for example
+`SQLCipher.framework`) into `SignalMac.app/Contents/Frameworks` and adds the
+rpath. If a different library is reported missing, paste the crash report's
+"Library not loaded" line; the build script prints `embedded <name>` for each
+framework it copied.
