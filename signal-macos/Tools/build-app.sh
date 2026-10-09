@@ -88,8 +88,9 @@ for fw in "$CONTENTS"/Frameworks/*.framework; do
 done
 codesign --force --sign - "$APP"
 
-# Verify every @rpath library resolves inside the bundle.
-if otool -L "$EXE" | awk '/@rpath\//{print $1}' | while read -r dep; do
+# Verify every @rpath framework resolves inside the bundle (system Swift
+# runtime libraries resolve from the OS and are deliberately not checked).
+if otool -L "$EXE" | awk '/@rpath\/.*\.framework\//{print $1}' | while read -r dep; do
     rel=$(printf '%s' "$dep" | sed 's|@rpath/||')
     [ -e "$CONTENTS/Frameworks/$rel" ] || { echo "missing in bundle: $rel" >&2; exit 1; }
 done; then :; else exit 1; fi
