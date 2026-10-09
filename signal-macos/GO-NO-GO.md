@@ -260,3 +260,38 @@ attachments to B; thumbnails to C; RingRTC cfg to D; backup to G.
   override is `setProxy`, whose `UNENCRYPTED_FOR_TESTING` user is explicitly
   "not a stable feature" (`Net.swift:118-120`). Decision: no mock-server lane;
   vectors plus live checkpoints only.
+
+---
+
+# Milestone B verdict (Groups and attachments)
+
+**Status: PENDING OWNER CHECKPOINT RUN.** All automatable work is done;
+the harness is green (see the Task 1–4 ledger lines in
+`.superpowers/sdd/2026-10-09-milestone-b-groups-attachments/progress.md`).
+The milestone is done only when `CHECKPOINT-B.md` passes live on the
+owner's phone.
+
+## Scope (shipped, awaiting live proof)
+
+- Signal-format attachment crypto (AES-256-CBC + HMAC-SHA256, key in the
+  pointer) with golden vectors; upload-first send + download-on-open
+  receive over the live CDN; images inline, files as rows; 100 MB cap
+  enforced before any network; tampered blobs deleted, never rendered.
+- Contact sync from the phone (automatic request after link, blob download,
+  `DeviceContacts` import, idempotent upserts; bad entries skipped).
+- Group chat both directions via sender keys: membership from GroupChange
+  actions + first-message bootstrap, revision-gated, redistribute + one
+  retry on mid-send membership moves; unknown groups show a placeholder
+  without dropping the socket.
+- Known deferrals (not failures): server group titles (threads show
+  `Group <8 hex>`), group photo sending (attach stays 1:1), contact avatars
+  (imported entries, not displayed), GroupChange signature validation.
+
+## Exit gate
+
+- [ ] `CHECKPOINT-B.md` passes live (owner, production, with a contact):
+  link, 1:1 still green, 3-way group chat, photo both ways, file one way,
+  phone-accurate names, unlink/relink sanity, log redaction, build stamp.
+- [ ] Harness green at the checkpoint commit
+  (`cd signal-macos && SIGNAL_NO_RINGRTC=1 swift run --disable-sandbox SpikeHarness`
+  ends `ALL CHECKS PASSED`) + strict-concurrency clean.
