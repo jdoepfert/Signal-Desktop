@@ -18,7 +18,7 @@ func runStorageTests() async {
         let back = try await db.keyValue.get("k")
         check(
             "StorageTests.testMemoryRoundTrip",
-            back == Data("value".utf8) && MigrationChain.currentVersion == 7
+            back == Data("value".utf8) && MigrationChain.currentVersion == 8
         )
     } catch {
         check("StorageTests.testMemoryRoundTrip", false, "\(error)")
@@ -158,6 +158,37 @@ func runV5ToV6MigrationTests() {
         )
     } catch {
         check("StorageTests.testV5ToV6Migration", false, "\(error)")
+    }
+}
+
+// v7 -> v8: a pre-existing group row keeps its members and gains
+// sender_epoch 0 (no spurious rotation for old groups).
+func runV7ToV8MigrationTests() {
+    do {
+        let queue = try DatabaseQueue()
+        try MigrationChain.migrate(queue, through: "v7-attachments")
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO group_state (master_key, revision, members_json)
+                VALUES (x'010203', 2, '["alice","bob"]')
+                """)
+        }
+        try MigrationChain.migrate(queue)
+        var epoch: Int?
+        var members: String?
+        var revision: Int?
+        try queue.read { db in
+            epoch = try Int.fetchOne(db, sql: "SELECT sender_epoch FROM group_state WHERE master_key = x'010203'")
+            members = try String.fetchOne(db, sql: "SELECT members_json FROM group_state WHERE master_key = x'010203'")
+            revision = try Int.fetchOne(db, sql: "SELECT revision FROM group_state WHERE master_key = x'010203'")
+        }
+        check(
+            "StorageTests.testV7ToV8Migration",
+            epoch == 0 && members == "[\"alice\",\"bob\"]" && revision == 2,
+            "epoch=\(String(describing: epoch)) members=\(String(describing: members))"
+        )
+    } catch {
+        check("StorageTests.testV7ToV8Migration", false, "\(error)")
     }
 }
 

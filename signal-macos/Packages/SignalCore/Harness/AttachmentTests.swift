@@ -244,7 +244,8 @@ private func uploadFormJSON() throws -> Data {
 }
 
 func runLiveCDNTests() async {
-    // Live CDN: form issuance path, signed POST upload, keyed GET download.
+    // Live CDN: form issuance, resumable upload (POST initiate with no
+    // bytes -> `location`, single PUT with Content-Range), keyed download.
     do {
         final class FormRecorder: @unchecked Sendable {
             var paths = [String]()
@@ -252,6 +253,7 @@ func runLiveCDNTests() async {
         let formPaths = FormRecorder()
         final class HttpRecorder: @unchecked Sendable {
             var requests = [URLRequest]()
+            var postBody: Data?
             var putBody: Data?
         }
         let recorder = HttpRecorder()
@@ -261,10 +263,18 @@ func runLiveCDNTests() async {
         }
         let http: LiveCDNClient.HttpSend = { request in
             recorder.requests.append(request)
+            if request.httpMethod == "POST" {
+                recorder.postBody = request.httpBody
+                let initiate = HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil,
+                    headerFields: ["Location": "https://example.invalid/upload-bytes"]
+                )!
+                return (Data(), initiate)
+            }
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
             )!
-            if request.httpMethod == "POST" {
+            if request.httpMethod == "PUT" {
                 recorder.putBody = request.httpBody
                 return (Data(), response)
             }
@@ -278,6 +288,7 @@ func runLiveCDNTests() async {
         let pointer = try await service.upload(Data("live-blob".utf8), contentType: "text/plain")
         let roundTripped = try await service.download(pointer)
         let posts = recorder.requests.filter { $0.httpMethod == "POST" }
+        let puts = recorder.requests.filter { $0.httpMethod == "PUT" }
         let gets = recorder.requests.filter { $0.httpMethod == "GET" }
         check(
             "MessagingTests.testAttachmentTransportRoundTrip",
@@ -286,9 +297,14 @@ func runLiveCDNTests() async {
                 && posts.count == 1
                 && posts.first?.url?.absoluteString == "https://example.invalid/signed-put"
                 && posts.first?.value(forHTTPHeaderField: "Content-Type") == "application/octet-stream"
+                && recorder.postBody == nil
+                && puts.count == 1
+                && puts.first?.url?.absoluteString == "https://example.invalid/upload-bytes"
+                && puts.first?.value(forHTTPHeaderField: "Content-Range") == "bytes 0-*/592"
+                && recorder.putBody?.count == 592
                 && gets.count == 1
                 && gets.first?.url?.absoluteString == "https://cdn-staging.signal.org/attachments/\(pointer.cdnKey)",
-            "formPaths=\(formPaths.paths) posts=\(posts.count) gets=\(gets.count)"
+            "formPaths=\(formPaths.paths) posts=\(posts.count) puts=\(puts.count) gets=\(gets.count)"
         )
     } catch {
         check("MessagingTests.testAttachmentTransportRoundTrip", false, "\(error)")

@@ -16,6 +16,18 @@ import SignalStorage
 public enum ContactSync {
     private static let logger = Logger(subsystem: "contacts", category: "sync")
 
+    /// KeyValue flag marking that we already asked the phone for its
+    /// contacts. The request gate must not use the contacts row count: link
+    /// stores our own profile key first, so the table is never empty after
+    /// link and the request would never fire.
+    public static let syncRequestedKey = "contact-sync-requested"
+
+    /// True until we have asked once. Ingest is idempotent, so one extra
+    /// request for accounts linked before this flag existed is harmless.
+    public static func shouldRequestSync(syncRequested: Bool) -> Bool {
+        !syncRequested
+    }
+
     public struct Entry: Sendable, Equatable {
         public var aci: String
         public var name: String?

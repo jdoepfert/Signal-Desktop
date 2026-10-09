@@ -29,7 +29,14 @@ public enum GroupStateService {
         guard let changeBytes, !changeBytes.isEmpty else {
             return GroupMembership(masterKey: masterKey, revision: revision, added: [], removed: [])
         }
-        guard let actions = try? SignalServiceProtos_GroupChange.Actions(serializedBytes: changeBytes) else {
+        // `groupChange` carries a serialized GroupChange wrapper; the member
+        // actions live in its `actions` field (Desktop groups.preload.ts),
+        // not at the top level of the bytes.
+        guard
+            let change = try? SignalServiceProtos_GroupChange(serializedBytes: changeBytes),
+            !change.actions.isEmpty,
+            let actions = try? SignalServiceProtos_GroupChange.Actions(serializedBytes: change.actions)
+        else {
             Self.logger.error("group change unparseable")
             return nil
         }

@@ -8,7 +8,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 7
+    public static let currentVersion = 8
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -214,6 +214,14 @@ public enum MigrationChain {
             }
             try db.alter(table: "attachments") { t in
                 t.add(column: "cdn_number", .integer).notNull().defaults(to: 0)
+            }
+        }
+        migrator.registerMigration("v8-sender-epoch") { db in
+            // Our sender-key rotation counter per group: bumped whenever a
+            // member is removed, so the next send starts a fresh chain the
+            // removed member never receives.
+            try db.alter(table: "group_state") { t in
+                t.add(column: "sender_epoch", .integer).notNull().defaults(to: 0)
             }
         }
         return migrator

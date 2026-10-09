@@ -19,6 +19,12 @@
 - Redaction: never log group titles, member lists, file bytes/keys, contact names/phones, avatar bytes; status codes + `ErrorReason.describe` only.
 - New messaging code must compile on the Linux lane (`Tools/linux-lane.sh`).
 - Out of scope (owner-parked): disappearing timers, GRDB fork, safety-number retest, new-conversation UI (line 12 stays skipped), thumbnails/transcoding (C), voice (C), reactions (F).
+- Parked to the C1 plan by the fix review (2026-10-09; verdict "Ready to merge — Yes", Minor only):
+  1. `testGroupRetryAfterRemovalUsesFreshChain` asserts the retry's epoch but not the security property: a removed member must receive **no** retry ciphertext. Add the assertion (e.g. no retry sends addressed to the removed members).
+  2. `MessageStore.applyMembership` decodes `members_json` with `try?` and defaults to `[]` on failure, silently dropping the roster on a corrupt row. Log at minimum; ideally treat decode failure as a hard error.
+  3. `GroupManager` fan-out recomputes `masterKey.hexString` per member-device; hoist it out of the loop (hot path).
+  4. The group-vanished-between-loads path in the mid-send retry rethrows `unknownGroup` silently; add a log line.
+  5. Checkpoint B script: add a live line that exercises a membership change while the Mac is online (add a contact from the phone, then send from the Mac) — the epoch-bump path is only reachable via sync/ingest and has no live coverage. Owner run: treat lines 4/5 as the verdict on the resumable-upload switch (`LiveCDNClient.put`).
 
 ## Review Focus
 

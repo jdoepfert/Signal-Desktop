@@ -13,9 +13,13 @@ import SignalStorage
 
 public enum GroupSendError: Error, Equatable {
     case unknownGroup
-    /// The transport reports the member set moved under us. The manager
-    /// redistributes to newly-added members and retries the send exactly
-    /// once; a second failure propagates.
+    /// The roster holds no one but us (bootstrapped from our own message
+    /// before any other member was seen). Sending would reach nobody, so
+    /// refuse instead of recording a sent row no one receives.
+    case noOtherMembers
+    /// The member set moved under us (or the transport reports the device
+    /// list did). The manager redistributes to newly-added members and
+    /// retries the send exactly once; a second failure propagates.
     case membershipChanged
 }
 
@@ -27,9 +31,10 @@ public protocol GroupDistributionSender: Sendable {
 }
 
 /// GroupsV2 messaging over sender keys. Distribution IDs derive
-/// deterministically from (master key, sender address + device) so restarts
-/// reuse the same distribution instead of resetting receiver chains (no
-/// schema churn, no spurious redistribution).
+/// deterministically from (master key, sender address + device, sender
+/// epoch) so restarts reuse the same distribution instead of resetting
+/// receiver chains (no spurious redistribution), while a member removal
+/// bumps the epoch and starts a fresh chain the removed member never gets.
 public final class GroupManager: @unchecked Sendable {
     private let store: any SignalProtocolStore
     private let groups: GroupStateTable
@@ -57,7 +62,7 @@ public final class GroupManager: @unchecked Sendable {
         self.sender = sender
     }
 
-    public static func distributionId(masterKey: Data, sender: ProtocolAddress) -> UUID {
+    public static func distributionId(masterKey: Data, sender: ProtocolAddress, epoch: UInt32 = 0) -> UUID {
         var input = Data()
         input.append(masterKey)
         input.append(Data(sender.name.utf8))
@@ -67,6 +72,12 @@ public final class GroupManager: @unchecked Sendable {
             UInt8((device >> 16) & 0xFF),
             UInt8((device >> 8) & 0xFF),
             UInt8(device & 0xFF),
+        ])
+        input.append(contentsOf: [
+            UInt8((epoch >> 24) & 0xFF),
+            UInt8((epoch >> 16) & 0xFF),
+            UInt8((epoch >> 8) & 0xFF),
+            UInt8(epoch & 0xFF),
         ])
         let digest = Array(SHA256.hash(data: input).prefix(16))
         return UUID(uuid: (
@@ -82,8 +93,18 @@ public final class GroupManager: @unchecked Sendable {
         revision: UInt32,
         members: [String]
     ) throws {
+        // A removed member must not keep reading our chain: bump the epoch
+        // so the next send starts a fresh distribution. Pure additions (or
+        // a first sighting) keep the epoch and reuse the chain.
+        let existing = try groups.load(masterKey: masterKey)
+        let removed = Set(existing?.members ?? []).subtracting(members)
         try groups.save(
-            StoredGroupState(masterKey: masterKey, revision: revision, members: members)
+            StoredGroupState(
+                masterKey: masterKey,
+                revision: revision,
+                members: members,
+                senderEpoch: (existing?.senderEpoch ?? 0) + (removed.isEmpty ? 0 : 1)
+            )
         )
     }
 
@@ -92,24 +113,45 @@ public final class GroupManager: @unchecked Sendable {
         guard let state = try groups.load(masterKey: masterKey) else {
             throw GroupSendError.unknownGroup
         }
-        let distributionId = Self.distributionId(masterKey: masterKey, sender: ourAddress)
-        let (content, timestamp) = try GroupManager.content(
-            text: text,
-            group: masterKey,
-            revision: state.revision
+        guard state.members.contains(where: { $0 != ourAddress.name }) else {
+            throw GroupSendError.noOtherMembers
+        }
+        let distributionId = Self.distributionId(
+            masterKey: masterKey,
+            sender: ourAddress,
+            epoch: state.senderEpoch
         )
+        // One timestamp for the attempt and the retry: the outbox row and
+        // the wire bytes agree, while the revision is re-read fresh.
+        let timestamp = Self.nowMs()
         do {
             try await ensureDistributed(state: state, distributionId: distributionId)
-            try await sendCiphertext(content, state: state, distributionId: distributionId)
-        } catch GroupSendError.membershipChanged {
-            // Re-read: the caller updated membership via joinKnownGroup;
-            // distribute to the newly-added members, then retry once.
-            // Already-distributed members are skipped, so the retry only
-            // covers what the failed attempt missed.
-            if let fresh = try groups.load(masterKey: masterKey) {
-                try await ensureDistributed(state: fresh, distributionId: distributionId)
+            try await sendCiphertext(
+                Self.content(text: text, group: masterKey, revision: state.revision, timestamp: timestamp),
+                state: state,
+                distributionId: distributionId
+            )
+        } catch GroupSendError.membershipChanged, SignalError.mismatchedDevices {
+            // The roster moved under us (or the transport reports the
+            // device list did): re-read, redistribute to newly-added
+            // members, then retry once against the fresh roster. A second
+            // failure propagates. The distribution id comes from the fresh
+            // epoch: a removal mid-send must not resume the removed
+            // member's old chain.
+            guard let fresh = try groups.load(masterKey: masterKey) else {
+                throw GroupSendError.unknownGroup
             }
-            try await sendCiphertext(content, state: state, distributionId: distributionId)
+            let freshDistributionId = Self.distributionId(
+                masterKey: masterKey,
+                sender: ourAddress,
+                epoch: fresh.senderEpoch
+            )
+            try await ensureDistributed(state: fresh, distributionId: freshDistributionId)
+            try await sendCiphertext(
+                Self.content(text: text, group: masterKey, revision: fresh.revision, timestamp: timestamp),
+                state: fresh,
+                distributionId: freshDistributionId
+            )
         }
         return timestamp
     }
@@ -142,9 +184,9 @@ public final class GroupManager: @unchecked Sendable {
     private static func content(
         text: String,
         group masterKey: Data,
-        revision: UInt32
-    ) throws -> (Data, UInt64) {
-        let timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
+        revision: UInt32,
+        timestamp: UInt64
+    ) throws -> Data {
         var groupV2 = SignalServiceProtos_GroupContextV2()
         groupV2.masterKey = masterKey
         groupV2.revision = revision
@@ -154,11 +196,11 @@ public final class GroupManager: @unchecked Sendable {
         dataMessage.groupV2 = groupV2
         var content = SignalServiceProtos_Content()
         content.dataMessage = dataMessage
-        return (try Padding.pad(content.serializedData()), timestamp)
+        return try Padding.pad(content.serializedData())
     }
 
-    private func distributionKey(group: Data, aci: String, deviceId: UInt32) -> String {
-        "\(group.hexString):\(aci):\(deviceId)"
+    private func distributionKey(group: Data, epoch: UInt32, aci: String, deviceId: UInt32) -> String {
+        "\(group.hexString):\(epoch):\(aci):\(deviceId)"
     }
 
     private func ensureDistributed(
@@ -172,6 +214,7 @@ public final class GroupManager: @unchecked Sendable {
                 let deviceId = device.deviceId
                 let key = distributionKey(
                     group: state.masterKey,
+                    epoch: state.senderEpoch,
                     aci: memberAci,
                     deviceId: deviceId
                 )

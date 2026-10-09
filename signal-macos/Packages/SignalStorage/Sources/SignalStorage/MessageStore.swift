@@ -251,15 +251,17 @@ public final class MessageStore: Sendable, MessageWriting {
         struct RevisionRow: FetchableRecord {
             let revision: Int64
             let membersJson: String
+            let senderEpoch: Int64?
 
             init(row: Row) {
                 revision = row["revision"]
                 membersJson = row["members_json"]
+                senderEpoch = row["sender_epoch"]
             }
         }
         let existing = try RevisionRow.fetchOne(
             db,
-            sql: "SELECT revision, members_json FROM group_state WHERE master_key = ?",
+            sql: "SELECT revision, members_json, sender_epoch FROM group_state WHERE master_key = ?",
             arguments: [membership.masterKey]
         )
         if let existing {
@@ -271,17 +273,21 @@ public final class MessageStore: Sendable, MessageWriting {
             let members = Array(
                 Set(current).union(membership.added).subtracting(membership.removed)
             ).sorted()
+            // A member actually gone rotates our sending chain with the
+            // roster update, in the same transaction.
+            let removed = Set(membership.removed).intersection(current)
+            let epoch = (existing.senderEpoch ?? 0) + (removed.isEmpty ? 0 : 1)
             let encoded = String(data: try JSONEncoder().encode(members), encoding: .utf8) ?? "[]"
             try db.execute(
-                sql: "UPDATE group_state SET revision = ?, members_json = ? WHERE master_key = ?",
-                arguments: [Int64(membership.revision), encoded, membership.masterKey]
+                sql: "UPDATE group_state SET revision = ?, members_json = ?, sender_epoch = ? WHERE master_key = ?",
+                arguments: [Int64(membership.revision), encoded, epoch, membership.masterKey]
             )
             return
         }
         let members = Array(Set(membership.added + [senderAci])).sorted()
         let encoded = String(data: try JSONEncoder().encode(members), encoding: .utf8) ?? "[]"
         try db.execute(
-            sql: "INSERT INTO group_state (master_key, revision, members_json) VALUES (?, ?, ?)",
+            sql: "INSERT INTO group_state (master_key, revision, members_json, sender_epoch) VALUES (?, ?, ?, 0)",
             arguments: [membership.masterKey, Int64(membership.revision), encoded]
         )
     }
@@ -312,6 +318,9 @@ public final class MessageStore: Sendable, MessageWriting {
                 message.attachment?.digest,
             ]
         )
+        // Capture before the attachment upsert below: its changes would
+        // otherwise make a duplicate message look newly inserted.
+        let messageInserted = db.changesCount == 1
         if let attachment = message.attachment {
             try db.execute(
                 sql: """
@@ -335,7 +344,7 @@ public final class MessageStore: Sendable, MessageWriting {
                 ]
             )
         }
-        let inserted = db.changesCount == 1
+        let inserted = messageInserted
         guard
             let rowId: Int64 = try Int64.fetchOne(
                 db,

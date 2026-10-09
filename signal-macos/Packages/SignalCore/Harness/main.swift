@@ -77,6 +77,7 @@ await runAsync("StorageTests") {
     runOpenErrorMappingTests()
     runMigrationAtomicityTests()
     runV5ToV6MigrationTests()
+    runV7ToV8MigrationTests()
     await runIdentityTests()
     await runSameKeyConcurrencyTests()
 }

@@ -342,4 +342,24 @@ func runContactSyncTests() async {
     } catch {
         check("MessagingTests.testContactSyncSkipsBadEntry", false, "\(error)")
     }
+
+    // Sync request gate: requested once (kv flag), never gated on the
+    // contacts row count (linking stores our own profile key first, so an
+    // empty table never happens after link).
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let before = try await db.keyValue.get(ContactSync.syncRequestedKey)
+        check(
+            "MessagingTests.testContactSyncGate",
+            ContactSync.shouldRequestSync(syncRequested: before != nil) && !ContactSync.shouldRequestSync(syncRequested: true)
+        )
+        try await db.keyValue.set(Data([1]), for: ContactSync.syncRequestedKey)
+        let after = try await db.keyValue.get(ContactSync.syncRequestedKey)
+        check(
+            "MessagingTests.testContactSyncGatePersists",
+            !ContactSync.shouldRequestSync(syncRequested: after != nil)
+        )
+    } catch {
+        check("MessagingTests.testContactSyncGate", false, "\(error)")
+    }
 }

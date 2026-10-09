@@ -8,11 +8,15 @@ public struct StoredGroupState: Sendable, Equatable {
     public let masterKey: Data
     public let revision: UInt32
     public let members: [String]
+    /// Our sender-key rotation counter: bumped on member removal so the
+    /// next send starts a fresh chain. Feeds the distribution id.
+    public let senderEpoch: UInt32
 
-    public init(masterKey: Data, revision: UInt32, members: [String]) {
+    public init(masterKey: Data, revision: UInt32, members: [String], senderEpoch: UInt32 = 0) {
         self.masterKey = masterKey
         self.revision = revision
         self.members = members
+        self.senderEpoch = senderEpoch
     }
 }
 
@@ -49,10 +53,10 @@ public final class GroupStateTable: Sendable {
         try queue.write { db in
             try db.execute(
                 sql: """
-                    INSERT OR REPLACE INTO group_state (master_key, revision, members_json)
-                    VALUES (?, ?, ?)
+                    INSERT OR REPLACE INTO group_state (master_key, revision, members_json, sender_epoch)
+                    VALUES (?, ?, ?, ?)
                     """,
-                arguments: [state.masterKey, Int64(state.revision), members]
+                arguments: [state.masterKey, Int64(state.revision), members, Int64(state.senderEpoch)]
             )
         }
     }
@@ -62,18 +66,20 @@ public final class GroupStateTable: Sendable {
             let masterKey: Data
             let revision: Int64
             let membersJson: String
+            let senderEpoch: Int64?
 
             init(row: Row) {
                 masterKey = row["master_key"]
                 revision = row["revision"]
                 membersJson = row["members_json"]
+                senderEpoch = row["sender_epoch"]
             }
         }
         guard
             let row = try queue.read({ db in
                 try GroupRow.fetchOne(
                     db,
-                    sql: "SELECT master_key, revision, members_json FROM group_state WHERE master_key = ?",
+                    sql: "SELECT master_key, revision, members_json, sender_epoch FROM group_state WHERE master_key = ?",
                     arguments: [masterKey]
                 )
             })
@@ -89,7 +95,8 @@ public final class GroupStateTable: Sendable {
         return StoredGroupState(
             masterKey: row.masterKey,
             revision: UInt32(row.revision),
-            members: members
+            members: members,
+            senderEpoch: row.senderEpoch.map { UInt32(truncatingIfNeeded: $0) } ?? 0
         )
     }
 }

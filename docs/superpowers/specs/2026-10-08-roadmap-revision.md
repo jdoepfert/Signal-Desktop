@@ -4,6 +4,8 @@
 # Roadmap revision: checkpoint-driven milestones
 
 - Status: proposed (2026-10-08), awaiting owner approval
+- Revised 2026-10-09: split milestone C into C1 (voice) and C2 (media
+  viewer); added process items 7–11.
 - Amends: `docs/superpowers/specs/2026-10-07-native-swift-macos-design.md`
   (sections "Components / reuse map", "Testing", "Implementation plan").
   Everything else in that spec (outcome, non-goals, layers, data flow,
@@ -80,6 +82,29 @@ the **phase size**: 3–6-month phases, closed without a live test.
      on the owner's Mac (or a macOS CI runner).
    - Linux cloud sessions can write code and docs and generate vectors,
      but cannot claim "tests pass".
+7. **Plan-conformance check.** Each milestone's final task includes a
+   mechanical step comparing the plan's `Files:` Create/Modify lists
+   against `git diff --stat` of the milestone range; every deviation is
+   recorded as a ruling in the milestone ledger. A plan whose files do
+   not match what shipped is a finding, not a footnote.
+8. **Deferral ledger.** Each milestone plan lists every parked item from
+   prior plans and either schedules it or explicitly re-parks it with a
+   target milestone. A parked item may not go silent: if it is not in
+   this plan and not re-parked with a target, it is a gap.
+9. **Checkpoint deferrals verbatim.** The checkpoint script's preamble
+   enumerates the plan's parked items word for word as "expected, not a
+   failure" lines. A checkpoint step in the plan writes them; the
+   reviewer checks they match.
+10. **Fix rounds are planned, not improvised.** Every milestone plan
+    carries an explicit fix task between the whole-milestone review and
+    the checkpoint doc, so review findings have a budgeted home. A
+    milestone that needs a second fix round records why the first one
+    was not enough.
+11. **Spike-first for never-demonstrated integrations.** A milestone
+    whose scope includes an integration never shown working on this
+    stack (e.g. the WebRTC ObjC module in D) starts with a timeboxed
+    Task 0 that demonstrates only that integration, before any
+    dependent code is planned or written.
 
 ## Revised roadmap
 
@@ -90,7 +115,8 @@ so it can use what the live test taught us.
 |---|---|---|
 | **A: Text messaging that actually works** | Protocol correctness: provisioning, identity, Envelope receive with padding and ack-after-persist, interoperable send (padding, access keys, all-device fan-out, 409/410), sync transcripts, account restore, prekey upkeep, honouring disappearing-message timers, profile names, owned GRDB fork, bounded logging. 1:1 and Note to Self only. | **Checkpoint A (interim review):** link to your phone, relaunch without re-linking, Note to Self both ways, 1:1 text both ways with a real contact, the phone shows messages sent from the Mac, and a placeholder appears for unsupported content. |
 | B: Groups and attachments | Group context in DataMessage, group state fetch, sender keys with correct SKDM wrapping and rotation, Signal-format attachment crypto (CBC+HMAC, padding, keys in the pointer), contact sync from the phone, image and file send/receive. | Group chat with the phone and a contact, a photo both ways, and contacts named as they are on the phone. |
-| C: Voice messages and media | Voice notes (AVFoundation record/encode, waveform, `VOICE_MESSAGE` flag), audio playback, video attachment playback, media viewer and gallery, thumbnails and transcoding. | Record a voice note on the Mac and play it on the phone, and the reverse; play a video from the phone. |
+| C1: Voice notes and audio | Voice notes (AVFoundation record/encode, waveform, `VOICE_MESSAGE` flag) and audio playback. | Record a voice note on the Mac and play it on the phone, and the reverse. |
+| C2: Media viewer and gallery | Video attachment playback, media viewer and gallery, thumbnails and transcoding. | Play a video from the phone; the gallery shows received images and video with thumbnails. |
 | D: 1:1 calls | RingRTC with the WebRTC ObjC module (decision made at plan time), the macOS RingRTC cfg upstreamed or vendored, call signalling over the fixed send path, audio then video, macOS call window, call history. | Audio and video call between Mac and phone, both directions. |
 | E: Group calls and screen share | Group calls (SFU), call links, screen share. | Group call with the phone and a contact, and share the screen. |
 | F: Rich messaging | Reactions, quotes, edits (10 edits / 48 h, from Desktop), delete-for-everyone, full disappearing-timer UI and version handling, polls, stickers, emoji, gifts and badges. | Each feature round-trips with the phone. |
@@ -114,4 +140,5 @@ regression and cannot wait.
    Task 1 checks this. Golden vectors cover protocol correctness either
    way.
 4. Calling (D) is still the biggest unknown: the WebRTC ObjC module on
-   macOS was never linked in the spike.
+   macOS was never linked in the spike. Mitigation: item 11 above —
+   milestone D's plan starts with a timeboxed Task 0 that links it.

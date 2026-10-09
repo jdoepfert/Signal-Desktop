@@ -347,6 +347,8 @@ public final class AppState: ObservableObject {
             try stack.protocolStore.withTransaction { transaction in
                 _ = try stack.messages.persist(message, in: transaction)
             }
+        } catch let groupError as GroupSendError where groupError == .noOtherMembers {
+            self.error = "Cannot send: the group has no other members yet."
         } catch {
             self.error = String(describing: error)
         }
@@ -762,14 +764,19 @@ public final class AppState: ObservableObject {
         // resolve now (resolution never runs pre-connect, where it could
         // only fail and — before transport errors threw — poison the cache).
         await self.resolveMissingNames()
-        // Crash recovery for sync batches, then a first-time sync request:
-        // an empty contacts table means the phone never sent its book.
+        // Crash recovery for sync batches, then a first-time sync request.
+        // The gate is a persisted flag, never the contacts row count: link
+        // stores our own profile key first, so the table is never empty.
         await self.ingestContactSync()
-        if let stack, (try? stack.contacts.count()) == 0 {
-            do {
-                try await sender.requestContactSync()
-            } catch {
-                Self.logger.error("contact sync request failed (\(ErrorReason.describe(error)))")
+        if let stack {
+            let requested = (try? await stack.database.keyValue.get(ContactSync.syncRequestedKey)) != nil
+            if ContactSync.shouldRequestSync(syncRequested: requested) {
+                do {
+                    try await sender.requestContactSync()
+                    try await stack.database.keyValue.set(Data([1]), for: ContactSync.syncRequestedKey)
+                } catch {
+                    Self.logger.error("contact sync request failed (\(ErrorReason.describe(error)))")
+                }
             }
         }
     }

@@ -12,7 +12,8 @@ import SignalLogging
 /// - upload form: `GET /v4/attachments/form/upload?uploadLength={n}` over the
 ///   authenticated socket (route from libsignal's own `get_upload_form`,
 ///   `rust/net/chat/src/ws/messages.rs`);
-/// - blob upload: POST to the signed URL with the form headers;
+/// - blob upload: POST to the signed URL with the form headers (no bytes)
+///   to obtain the byte `location`, then PUT the blob with Content-Range;
 /// - blob download: `GET {cdnBase}/attachments/{key}` (`getAttachment`,
 ///   cdn number defaulting to 0).
 /// Logs status codes only — never keys, URLs, or bytes.
@@ -90,16 +91,30 @@ public struct LiveCDNClient: CDNClient, Sendable {
     }
 
     public func put(_ bytes: Data, form: UploadForm) async throws -> String {
-        var request = URLRequest(url: form.signedUploadUrl)
-        request.httpMethod = "POST"
+        // Resumable upload (Desktop `putEncryptedAttachment`): POST to the
+        // signed URL with the form headers and no bytes to obtain the byte
+        // location, then a single PUT of the whole blob with Content-Range.
+        var initiate = URLRequest(url: form.signedUploadUrl)
+        initiate.httpMethod = "POST"
         for (name, value) in form.headers {
-            request.setValue(value, forHTTPHeaderField: name)
+            initiate.setValue(value, forHTTPHeaderField: name)
         }
-        request.httpBody = bytes
-        let (_, response) = try await http(request)
-        guard (200..<300).contains(response.statusCode) else {
-            Self.logger.error("blob upload rejected: HTTP \(response.statusCode)")
-            throw AttachmentError.transferFailed(status: response.statusCode)
+        let (_, initiateResponse) = try await http(initiate)
+        guard (200..<300).contains(initiateResponse.statusCode),
+            let location = initiateResponse.value(forHTTPHeaderField: "location"),
+            let uploadUrl = URL(string: location)
+        else {
+            Self.logger.error("blob upload initiation rejected: HTTP \(initiateResponse.statusCode)")
+            throw AttachmentError.transferFailed(status: initiateResponse.statusCode)
+        }
+        var upload = URLRequest(url: uploadUrl)
+        upload.httpMethod = "PUT"
+        upload.setValue("bytes 0-*/\(bytes.count)", forHTTPHeaderField: "Content-Range")
+        upload.httpBody = bytes
+        let (_, uploadResponse) = try await http(upload)
+        guard (200..<300).contains(uploadResponse.statusCode) else {
+            Self.logger.error("blob upload rejected: HTTP \(uploadResponse.statusCode)")
+            throw AttachmentError.transferFailed(status: uploadResponse.statusCode)
         }
         return form.key
     }

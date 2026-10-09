@@ -59,6 +59,7 @@ func runReceiveTests() async {
     await testSealedDecryptFailureAtCapUsesCertificateSender()
     await testBinaryDestinationMismatchRejected()
     testPlaceholderDisplayText()
+    await testDuplicateAttachmentMessageReportsNotInserted()
 }
 
 // Sealed-sender and PREKEY_MESSAGE vectors from Desktop's stack through the
@@ -1290,6 +1291,38 @@ private func testBinaryDestinationMismatchRejected() async {
         )
     } catch {
         check("ReceiveTests.testBinaryDestinationMismatchRejected", false, "\(error)")
+    }
+}
+
+// A redelivered attachment message (same sender + timestamp) must report
+// not-inserted: the attachment upsert must not make a duplicate look new.
+private func testDuplicateAttachmentMessageReportsNotInserted() async {
+    do {
+        let rig = try ReceiverRig(ourAci: "bbbbbbbb-1111-4222-8333-444444444444", ourDevice: 3)
+        let attachment = NewAttachment(
+            digest: Data(repeating: 0xAA, count: 32),
+            cdnKey: "cdn-key",
+            cdnNumber: 0,
+            size: 10,
+            contentType: "image/jpeg",
+            key: Data(repeating: 0xBB, count: 64)
+        )
+        let message = NewMessage(
+            senderAci: "cccccccc-1111-4222-8333-444444444444",
+            body: "photo",
+            sentTimestamp: 1_700_001_000_000,
+            target: .direct(aci: "cccccccc-1111-4222-8333-444444444444"),
+            attachment: attachment
+        )
+        let first = try rig.store.withTransaction { tx in try rig.messages.persist(message, in: tx) }
+        let second = try rig.store.withTransaction { tx in try rig.messages.persist(message, in: tx) }
+        try checkT(
+            "ReceiveTests.testDuplicateAttachmentReportsNotInserted",
+            first.inserted && !second.inserted,
+            "first=\(first.inserted) second=\(second.inserted)"
+        )
+    } catch {
+        check("ReceiveTests.testDuplicateAttachmentReportsNotInserted", false, "\(error)")
     }
 }
 
