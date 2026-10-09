@@ -13,9 +13,11 @@
 - There is **no "new conversation" button yet**: a conversation appears on the
   Mac when a message arrives (or syncs from the phone). So the script starts by
   **receiving**, then replies.
-- **Known limitation:** contact names are not fetched yet, so conversations
-  and senders show the raw **account id** (a UUID), not a name. Your own Note
-  to Self thread shows your own account id.
+- **Names:** the Mac fetches contact profiles in the background, so within
+  ~10 seconds of a message arriving the conversation title and sender labels
+  show the contact's name, not a UUID. Titles may visibly flip from UUID to
+  name shortly after launch or arrival; that is expected. A contact with no
+  reachable profile still shows the raw account id (not a failure).
 - Not supported yet: groups, attachments, photos, reactions, voice notes,
   disappearing messages, calls, read receipts, typing indicators, backups.
   Anything of that kind shows a placeholder ("Message could not be shown")

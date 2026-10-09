@@ -356,6 +356,34 @@ public final class AppState: ObservableObject {
         }
     }
 
+    /// Resolves display names for the listed conversations and the open
+    /// thread in the background: unknown ACIs flip to names once their
+    /// profiles arrive, with no relink. Safe without a stack (launch
+    /// before link) and silent per contact — display falls back to
+    /// phone/ACI. Must go through `displayName(for:)` (never around the
+    /// cache) so fetched names persist.
+    private func resolveMissingNames() async {
+        guard let stack else {
+            return
+        }
+        var acis = Set<String>()
+        for conversation in conversations where conversation.id.hasPrefix("aci:") {
+            acis.insert(String(conversation.id.dropFirst(4)))
+        }
+        for message in thread.messages {
+            acis.insert(message.senderAci)
+        }
+        guard !acis.isEmpty else {
+            return
+        }
+        for aci in acis {
+            // Errors (and unknown contacts) keep the ACI; next arrival retries.
+            _ = try? await stack.contacts.displayName(for: aci)
+        }
+        refreshConversations()
+        objectWillChange.send()
+    }
+
     private static func makeNet(_ environment: AppEnvironment) -> Net {
         Net(env: netEnvironment(environment), userAgent: "signal-macos/0.0.0", buildVariant: .production)
     }
@@ -461,9 +489,13 @@ public final class AppState: ObservableObject {
         // Envelopes acked last session but not yet committed replay BEFORE
         // the socket opens, so they land ahead of anything new.
         await receiver.replayUnprocessed()
+        let liveProfiles = LiveProfileFetcher(
+            profileKey: { [contactTable] aci in try? contactTable.profileKey(aci: aci) },
+            send: { [chat] request in try await chat.send(request) }
+        )
         let contacts = ContactStore(
             contacts: contactTable,
-            profiles: ProfileFetcher { _ in nil }
+            profiles: ProfileFetcher { aci in await liveProfiles.fetchProfile(for: aci) }
         )
         stack = LiveStack(
             database: database,
@@ -496,6 +528,7 @@ public final class AppState: ObservableObject {
             await self.connectWithRetry(chat: chat, credentials: creds, sender: sender)
         }
         refreshConversations()
+        await resolveMissingNames()
         // Best-effort: denial just means no alerts (policy still runs).
         _ = try? await notifications.requestAuthorization()
     }
@@ -546,6 +579,9 @@ public final class AppState: ObservableObject {
                 // The receiver already committed the row, the conversation
                 // link, recency and unread count in the decrypt transaction.
                 refreshConversations()
+                if !message.isOutgoing {
+                    await resolveMissingNames()
+                }
                 guard let conversation = conversations.first(where: { $0.id == message.conversationId })
                 else {
                     continue
