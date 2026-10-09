@@ -79,3 +79,122 @@ func runContactTests() async {
         check("MessagingTests.testConversations", false, "\(error)")
     }
 }
+
+private func profileFixture() throws -> (
+    aci: String, key: Data, version: String, encryptedName: String, given: String, family: String
+) {
+    let v = try Vectors.load("profile")
+    guard
+        let aci = v["aci"] as? String,
+        let keyHex = v["profileKeyHex"] as? String,
+        let key = Vectors.data(hex: keyHex),
+        let version = v["version"] as? String,
+        let encryptedName = v["encryptedNameB64"] as? String,
+        let given = v["given"] as? String,
+        let family = v["family"] as? String
+    else {
+        throw Vectors.LoadError(name: "profile")
+    }
+    return (aci, key, version, encryptedName, given, family)
+}
+
+private func profileBody(name: String?) throws -> Data {
+    var object: [String: Any] = [:]
+    if let name {
+        object["name"] = name
+    }
+    return try JSONSerialization.data(withJSONObject: object)
+}
+
+func runProfileTests() async {
+    // Sealed name decrypts to given/family against the profile.json vector.
+    do {
+        let fixture = try profileFixture()
+        let split = ProfileNameCrypto.decrypt(base64: fixture.encryptedName, key: fixture.key)
+        check(
+            "MessagingTests.testProfileNameDecrypt",
+            split?.given == fixture.given && split?.family == fixture.family
+        )
+    } catch {
+        check("MessagingTests.testProfileNameDecrypt", false, "\(error)")
+    }
+
+    // Fake transport records the exact versioned path and serves the vector name.
+    do {
+        final class PathRecorder: @unchecked Sendable {
+            var paths = [String]()
+        }
+        let fixture = try profileFixture()
+        let recorder = PathRecorder()
+        let fetcher = LiveProfileFetcher(
+            profileKey: { _ in fixture.key },
+            send: { request in
+                recorder.paths.append(request.pathAndQuery)
+                return (200, try profileBody(name: fixture.encryptedName))
+            }
+        )
+        let profile = await fetcher.fetchProfile(for: fixture.aci.uppercased())
+        check(
+            "MessagingTests.testProfileFetchPath",
+            recorder.paths == ["/v1/profile/\(fixture.aci)/\(fixture.version)"]
+                && profile?.name == "\(fixture.given) \(fixture.family)"
+        )
+    } catch {
+        check("MessagingTests.testProfileFetchPath", false, "\(error)")
+    }
+
+    // Rejected credentials fall back silent to nil (ACI display upstream).
+    do {
+        let fixture = try profileFixture()
+        let fetcher = LiveProfileFetcher(
+            profileKey: { _ in fixture.key },
+            send: { _ in (403, Data()) }
+        )
+        let rejected = await fetcher.fetchProfile(for: fixture.aci)
+        check(
+            "MessagingTests.testProfileFetchRejected",
+            rejected == nil
+        )
+    } catch {
+        check("MessagingTests.testProfileFetchRejected", false, "\(error)")
+    }
+
+    // Unknown contact (404) falls back silent to nil.
+    do {
+        let fixture = try profileFixture()
+        let fetcher = LiveProfileFetcher(
+            profileKey: { _ in nil },
+            send: { _ in (404, Data()) }
+        )
+        let unknown = await fetcher.fetchProfile(for: fixture.aci)
+        check(
+            "MessagingTests.testProfileFetchUnknown",
+            unknown == nil
+        )
+    } catch {
+        check("MessagingTests.testProfileFetchUnknown", false, "\(error)")
+    }
+
+    // A name that does not decrypt under the stored key yields nil, never a crash.
+    do {
+        let fixture = try profileFixture()
+        let fetcher = LiveProfileFetcher(
+            profileKey: { _ in Data(repeating: 0x09, count: 32) },
+            send: { _ in (200, try profileBody(name: fixture.encryptedName)) }
+        )
+        let undecryptable = await fetcher.fetchProfile(for: fixture.aci)
+        check(
+            "MessagingTests.testProfileNameUndecryptable",
+            undecryptable == nil
+        )
+    } catch {
+        check("MessagingTests.testProfileNameUndecryptable", false, "\(error)")
+    }
+
+    // Blank names map to nil so ContactStore falls through to phone/ACI.
+    check(
+        "MessagingTests.testProfileNameBlank",
+        ProfileNameCrypto.displayName(given: "", family: nil) == ""
+            && ProfileNameCrypto.displayName(given: "  ", family: " ") == ""
+    )
+}
