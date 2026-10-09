@@ -528,7 +528,11 @@ public final class AppState: ObservableObject {
             await self.connectWithRetry(chat: chat, credentials: creds, sender: sender)
         }
         refreshConversations()
-        await resolveMissingNames()
+        // Background: name resolution must never stall launch behind
+        // profile network I/O.
+        Task {
+            await self.resolveMissingNames()
+        }
         // Best-effort: denial just means no alerts (policy still runs).
         _ = try? await notifications.requestAuthorization()
     }
@@ -580,7 +584,11 @@ public final class AppState: ObservableObject {
                 // link, recency and unread count in the decrypt transaction.
                 refreshConversations()
                 if !message.isOutgoing {
-                    await resolveMissingNames()
+                    // Background: message display, read marks and
+                    // notifications must not wait on profile network I/O.
+                    Task {
+                        await self.resolveMissingNames()
+                    }
                 }
                 guard let conversation = conversations.first(where: { $0.id == message.conversationId })
                 else {
