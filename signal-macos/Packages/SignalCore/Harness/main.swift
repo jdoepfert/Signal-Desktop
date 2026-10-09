@@ -99,6 +99,7 @@ await runAsync("MessagingTests") {
     await runProfileTests()
     await runGroupTests()
     await runAttachmentTests()
+    await runAttachmentCryptoTests()
     await runLiveTransportTests()
     await runUnauthChatTests()
     #if os(macOS)

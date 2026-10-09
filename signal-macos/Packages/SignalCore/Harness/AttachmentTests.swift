@@ -39,6 +39,14 @@ final class FakeCDN: CDNClient, @unchecked Sendable {
         }
         return blob
     }
+
+    func seed(key: String, blob: Data) {
+        lock.withLock { blobs[key] = blob }
+    }
+
+    func stored(key: String) -> Data? {
+        lock.withLock { blobs[key] }
+    }
 }
 
 private func attachmentTempLeftovers() -> [String] {
@@ -126,5 +134,102 @@ func runAttachmentTests() async {
         try? FileManager.default.removeItem(atPath: path)
     } catch {
         check("MessagingTests.testAttachmentDurable", false, "\(error)")
+    }
+}
+
+private func attachmentFixture() throws -> (
+    plain: Data, keys: Data, blob: Data, digest: Data, size: UInt64
+) {
+    let v = try Vectors.load("attachment")
+    guard
+        let plainHex = v["plainHex"] as? String, let plain = Vectors.data(hex: plainHex),
+        let keysHex = v["keysHex"] as? String, let keys = Vectors.data(hex: keysHex),
+        let blobHex = v["blobHex"] as? String, let blob = Vectors.data(hex: blobHex),
+        let digestHex = v["digestHex"] as? String, let digest = Vectors.data(hex: digestHex),
+        let size = v["size"] as? Int
+    else {
+        throw Vectors.LoadError(name: "attachment")
+    }
+    return (plain, keys, blob, digest, UInt64(size))
+}
+
+func runAttachmentCryptoTests() async {
+    // Oracle decrypt: blob under keys yields the plain bytes, digest verifies.
+    do {
+        let fixture = try attachmentFixture()
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let table = AttachmentTable(queue: db.queue)
+        let cdn = FakeCDN()
+        try table.save(
+            digest: fixture.digest, cdnKey: "cdn-key", size: fixture.size,
+            contentType: "text/plain", key: fixture.keys
+        )
+        cdn.seed(key: "cdn-key", blob: fixture.blob)
+        let service = AttachmentService(cdn: cdn, attachments: table)
+        let pointer = AttachmentPointer(
+            cdnKey: "cdn-key", digest: fixture.digest, size: fixture.size,
+            contentType: "text/plain", key: fixture.keys
+        )
+        let decrypted = try await service.download(pointer)
+        check(
+            "MessagingTests.testAttachmentDecryptCBC",
+            decrypted == fixture.plain
+        )
+    } catch {
+        check("MessagingTests.testAttachmentDecryptCBC", false, "\(error)")
+    }
+
+    // Flipped MAC byte throws and leaves no partial file.
+    do {
+        let fixture = try attachmentFixture()
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let table = AttachmentTable(queue: db.queue)
+        let cdn = FakeCDN()
+        try table.save(
+            digest: fixture.digest, cdnKey: "cdn-key", size: fixture.size,
+            contentType: "text/plain", key: fixture.keys
+        )
+        var tampered = fixture.blob
+        tampered[tampered.count - 1] ^= 0xFF
+        cdn.seed(key: "cdn-key", blob: tampered)
+        let service = AttachmentService(cdn: cdn, attachments: table)
+        let pointer = AttachmentPointer(
+            cdnKey: "cdn-key", digest: fixture.digest, size: fixture.size,
+            contentType: "text/plain", key: fixture.keys
+        )
+        do {
+            _ = try await service.download(pointer)
+            check("MessagingTests.testAttachmentTamperCBC", false, "no error thrown")
+        } catch let error as AttachmentError {
+            let leftovers = attachmentTempLeftovers().filter { $0.hasPrefix("signal-attachment-") }
+            check(
+                "MessagingTests.testAttachmentTamperCBC",
+                error == .digestMismatch && leftovers.isEmpty,
+                "\(leftovers)"
+            )
+        }
+    } catch {
+        check("MessagingTests.testAttachmentTamperCBC", false, "\(error)")
+    }
+
+    // Upload carries the key: the stored blob decrypts under pointer.key.
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let cdn = FakeCDN()
+        let table = AttachmentTable(queue: db.queue)
+        let service = AttachmentService(cdn: cdn, attachments: table)
+        let original = Data("carries-its-key".utf8)
+        let pointer = try await service.upload(original, contentType: "text/plain")
+        let stored = cdn.stored(key: pointer.cdnKey)
+        let record = try table.load(digest: pointer.digest)
+        check(
+            "MessagingTests.testAttachmentUploadPointerCarriesKey",
+            pointer.key.count == 64
+                && record?.key == pointer.key
+                && stored != nil
+                && (try? AttachmentCrypto.decrypt(blob: stored!, key: pointer.key, size: pointer.size)) == original
+        )
+    } catch {
+        check("MessagingTests.testAttachmentUploadPointerCarriesKey", false, "\(error)")
     }
 }

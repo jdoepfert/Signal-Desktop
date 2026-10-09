@@ -153,6 +153,54 @@ const profileKey = seeded('profile-key', 32);
   });
 }
 
+// --- Attachment (mirror of ts/Crypto.node.ts padAndEncryptAttachment) ------
+// Deterministic: seeded keys and IV. Layout IV(16) + ciphertext + MAC(32);
+// digest is SHA-256 over the blob; plaintextHash over the unpadded bytes.
+{
+  const keys = seeded('attachment/keys', 64);
+  const plain = Buffer.from('Attachment fixture bytes for CBC round-trip.', 'utf8');
+  const paddedSize = Math.max(
+    541,
+    Math.floor(1.05 ** Math.ceil(Math.log(plain.length) / Math.log(1.05)))
+  );
+  const padded = Buffer.alloc(paddedSize);
+  plain.copy(padded);
+  const iv = seeded('attachment/iv', 16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', keys.subarray(0, 32), iv);
+  const ciphertext = Buffer.concat([cipher.update(padded), cipher.final()]);
+  const ivAndCiphertext = Buffer.concat([iv, ciphertext]);
+  const mac = crypto.createHmac('sha256', keys.subarray(32, 64)).update(ivAndCiphertext).digest();
+  const blob = Buffer.concat([ivAndCiphertext, mac]);
+  const digest = crypto.createHash('sha256').update(blob).digest();
+  const plaintextHash = crypto.createHash('sha256').update(plain).digest();
+
+  // Self-check: the Desktop decrypt direction.
+  const decIv = blob.subarray(0, 16);
+  const decCt = blob.subarray(16, blob.length - 32);
+  const decMac = blob.subarray(blob.length - 32);
+  const expectMac = crypto.createHmac('sha256', keys.subarray(32, 64))
+    .update(blob.subarray(0, blob.length - 32)).digest();
+  if (!decMac.equals(expectMac)) {
+    throw new Error('attachment self-check: MAC mismatch');
+  }
+  const decipher = crypto.createDecipheriv('aes-256-cbc', keys.subarray(0, 32), decIv);
+  const roundTrip = Buffer.concat([decipher.update(decCt), decipher.final()]);
+  if (!roundTrip.equals(padded)) {
+    throw new Error('attachment self-check: decrypt mismatch');
+  }
+
+  write('attachment', {
+    plainHex: hex(plain),
+    keysHex: hex(keys),
+    ivHex: hex(iv),
+    blobHex: hex(blob),
+    digestHex: hex(digest),
+    plaintextHashHex: hex(plaintextHash),
+    size: plain.length,
+    paddedSize,
+  });
+}
+
 // --- Device name (mirror of ts/Crypto.node.ts encryptDeviceName) -----------
 // Deterministic: the ephemeral key is seeded. The protobuf is Desktop's own
 // protos/DeviceName.proto, encoded with protobufjs.
