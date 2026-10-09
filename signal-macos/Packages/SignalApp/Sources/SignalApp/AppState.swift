@@ -58,7 +58,18 @@ public final class AppState: ObservableObject {
     @Published public var linkedAci: String?
     @Published public var address: String?
     @Published public var conversations: [StoredConversation] = []
-    @Published public var selection: String?
+    /// The sidebar list binds directly to this property, so loading the
+    /// thread must hang off the change itself (`select` is only a helper).
+    @Published public var selection: String? {
+        didSet {
+            guard selection != oldValue else {
+                return
+            }
+            Task {
+                await reloadThread()
+            }
+        }
+    }
     @Published public var clockSkewed = false
     @Published public var error: String?
     @Published public var identityPrompt: IdentityChangePrompt?
@@ -301,10 +312,8 @@ public final class AppState: ObservableObject {
     }
 
     public func select(_ id: String?) {
+        // `selection`'s observer reloads the thread.
         selection = id
-        Task {
-            await reloadThread()
-        }
     }
 
     public func cachedName(for aci: String) -> String {
@@ -591,6 +600,9 @@ public final class AppState: ObservableObject {
             // Thread-scoped: only messages linked to this conversation.
             // Group scoping by conversation id arrives with group sync.
             let stored = try stack.messages.page(in: selection, limit: 500)
+            // `thread` is a nested ObservableObject the views do not observe
+            // directly: tell the views this object changed.
+            objectWillChange.send()
             thread.replaceAll(
                 with: stored.map {
                     ThreadMessage(
