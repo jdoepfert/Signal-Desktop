@@ -17,7 +17,7 @@ cd signal-macos
 
 ## 1. One-time setup
 
-1. **Xcode Command Line Tools** (full Xcode also works; it is not required):
+1. **Xcode Command Line Tools** (the app builds with these; full Xcode also works):
 
    ```sh
    xcode-select --install

@@ -118,17 +118,24 @@ public struct ContentView: View {
 
 /// Confirmed reset to a clean slate: deletes this Mac's local Signal data
 /// and returns to the QR link flow.
+/// Confirmation flag as an observable object rather than `@State`: the
+/// SwiftUI `@State` macro plugin only ships with full Xcode, and this builds
+/// with the Command Line Tools too.
+final class StartOverConfirmation: ObservableObject {
+    @Published var isPresented = false
+}
+
 struct StartOverButton: View {
     @ObservedObject var state: AppState
-    @State private var confirming = false
+    @StateObject private var confirmation = StartOverConfirmation()
 
     var body: some View {
         Button("Start over") {
-            confirming = true
+            confirmation.isPresented = true
         }
         .confirmationDialog(
             "Start over?",
-            isPresented: $confirming,
+            isPresented: $confirmation.isPresented,
             titleVisibility: .visible
         ) {
             Button("Delete local data and start over", role: .destructive) {
