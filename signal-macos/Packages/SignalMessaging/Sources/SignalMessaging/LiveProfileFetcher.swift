@@ -88,9 +88,10 @@ public enum ProfileNameCrypto {
 /// credential request on the authenticated socket is a real Desktop path
 /// (`ts/services/profiles.preload.ts:383-400`).
 ///
-/// Never throws: every failure (no key, undecryptable version, transport
-/// error, non-2xx, missing/blank name) returns nil so callers fall back
-/// to phone/ACI. Logs status codes and error types only — never ACIs,
+/// Never returns a cached-able lie: transport failures throw (so
+/// `ProfileFetcher` does not cache them as misses and later attempts
+/// retry), while semantic absence (non-2xx, missing/undecryptable/blank
+/// name) returns nil. Logs status codes and error types only — never ACIs,
 /// versions, names, keys or avatars.
 public struct LiveProfileFetcher: Sendable {
     public typealias Keys = @Sendable (String) -> Data?
@@ -110,7 +111,7 @@ public struct LiveProfileFetcher: Sendable {
         var avatar: String?
     }
 
-    public func fetchProfile(for aci: String) async -> Profile? {
+    public func fetchProfile(for aci: String) async throws -> Profile? {
         let id = aci.lowercased()
         var key = profileKey(id)
         if key?.count != 32 {
@@ -122,13 +123,8 @@ public struct LiveProfileFetcher: Sendable {
         } else {
             key = nil
         }
-        let response: (status: UInt16, body: Data)
-        do {
-            response = try await send(ChatRequest(method: "GET", pathAndQuery: path, timeout: 30))
-        } catch {
-            Self.logger.error("profile fetch failed (\(ErrorReason.describe(error)))")
-            return nil
-        }
+        // Transport errors propagate (never cached as misses by callers).
+        let response = try await send(ChatRequest(method: "GET", pathAndQuery: path, timeout: 30))
         guard (200..<300).contains(response.status) else {
             Self.logger.error("profile fetch rejected: HTTP \(response.status)")
             return nil

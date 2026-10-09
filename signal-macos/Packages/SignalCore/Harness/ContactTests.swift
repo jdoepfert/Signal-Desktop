@@ -133,7 +133,7 @@ func runProfileTests() async {
                 return (200, try profileBody(name: fixture.encryptedName))
             }
         )
-        let profile = await fetcher.fetchProfile(for: fixture.aci.uppercased())
+        let profile = try await fetcher.fetchProfile(for: fixture.aci.uppercased())
         check(
             "MessagingTests.testProfileFetchPath",
             recorder.paths == ["/v1/profile/\(fixture.aci)/\(fixture.version)"]
@@ -150,7 +150,7 @@ func runProfileTests() async {
             profileKey: { _ in fixture.key },
             send: { _ in (403, Data()) }
         )
-        let rejected = await fetcher.fetchProfile(for: fixture.aci)
+        let rejected = try await fetcher.fetchProfile(for: fixture.aci)
         check(
             "MessagingTests.testProfileFetchRejected",
             rejected == nil
@@ -166,7 +166,7 @@ func runProfileTests() async {
             profileKey: { _ in nil },
             send: { _ in (404, Data()) }
         )
-        let unknown = await fetcher.fetchProfile(for: fixture.aci)
+        let unknown = try await fetcher.fetchProfile(for: fixture.aci)
         check(
             "MessagingTests.testProfileFetchUnknown",
             unknown == nil
@@ -182,7 +182,7 @@ func runProfileTests() async {
             profileKey: { _ in Data(repeating: 0x09, count: 32) },
             send: { _ in (200, try profileBody(name: fixture.encryptedName)) }
         )
-        let undecryptable = await fetcher.fetchProfile(for: fixture.aci)
+        let undecryptable = try await fetcher.fetchProfile(for: fixture.aci)
         check(
             "MessagingTests.testProfileNameUndecryptable",
             undecryptable == nil
@@ -197,4 +197,55 @@ func runProfileTests() async {
         ProfileNameCrypto.displayName(given: "", family: nil) == ""
             && ProfileNameCrypto.displayName(given: "  ", family: " ") == ""
     )
+
+    // Transport failure throws (never nil): callers must not cache it as a miss.
+    do {
+        let fixture = try profileFixture()
+        let fetcher = LiveProfileFetcher(
+            profileKey: { _ in fixture.key },
+            send: { _ in throw ChatSessionError.notConnected }
+        )
+        var threw = false
+        do {
+            _ = try await fetcher.fetchProfile(for: fixture.aci)
+        } catch {
+            threw = true
+        }
+        check("MessagingTests.testProfileFetchTransportThrows", threw)
+    } catch {
+        check("MessagingTests.testProfileFetchTransportThrows", false, "\(error)")
+    }
+
+    // A throwing fetch is not cached: the next attempt runs the fetch again.
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        final class ThrowOnce: @unchecked Sendable {
+            var calls = 0
+        }
+        let throwOnce = ThrowOnce()
+        let profiles = ProfileFetcher { _ in
+            throwOnce.calls += 1
+            if throwOnce.calls == 1 {
+                throw ChatSessionError.notConnected
+            }
+            return Profile(name: "Bob Profile", avatarUrl: nil)
+        }
+        let store = ContactStore(
+            contacts: ContactTable(queue: db.queue),
+            profiles: profiles
+        )
+        var firstThrew = false
+        do {
+            _ = try await store.displayName(for: contactBob)
+        } catch {
+            firstThrew = true
+        }
+        let second = try await store.displayName(for: contactBob)
+        check(
+            "MessagingTests.testThrowingFetchNotCached",
+            firstThrew && second == "Bob Profile" && throwOnce.calls == 2
+        )
+    } catch {
+        check("MessagingTests.testThrowingFetchNotCached", false, "\(error)")
+    }
 }

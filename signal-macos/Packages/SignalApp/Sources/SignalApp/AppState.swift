@@ -495,7 +495,7 @@ public final class AppState: ObservableObject {
         )
         let contacts = ContactStore(
             contacts: contactTable,
-            profiles: ProfileFetcher { aci in await liveProfiles.fetchProfile(for: aci) }
+            profiles: ProfileFetcher { aci in try await liveProfiles.fetchProfile(for: aci) }
         )
         stack = LiveStack(
             database: database,
@@ -528,11 +528,6 @@ public final class AppState: ObservableObject {
             await self.connectWithRetry(chat: chat, credentials: creds, sender: sender)
         }
         refreshConversations()
-        // Background: name resolution must never stall launch behind
-        // profile network I/O.
-        Task {
-            await self.resolveMissingNames()
-        }
         // Best-effort: denial just means no alerts (policy still runs).
         _ = try? await notifications.requestAuthorization()
     }
@@ -563,6 +558,10 @@ public final class AppState: ObservableObject {
         // one retry, then fail.
         _ = await sender.recoverPending(now: Self.nowMs())
         await reloadThread()
+        // First connect won: the socket is up, so contact profiles can
+        // resolve now (resolution never runs pre-connect, where it could
+        // only fail and — before transport errors threw — poison the cache).
+        await self.resolveMissingNames()
     }
 
     private func handleDeviceUnlinked() {
