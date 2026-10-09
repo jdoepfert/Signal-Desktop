@@ -5,6 +5,7 @@
 #if os(macOS)
 import Foundation
 import SignalApp
+import SignalCore
 import SignalStorage
 
 func runConversationViewModelTests() async {
@@ -89,6 +90,27 @@ func runBuildInfoTests() {
         stamped.detail.contains("2a4116a")
             && stamped.detail.contains("2026-10-09T14:00:00Z")
             && stamped.detail.contains("2026.10.09")
+    )
+}
+
+func runNoteToSelfTests() async {
+    // Desktop titles the self thread "Note to Self", never a UUID or name.
+    let ownAci = "aaaaaaaa-1111-4111-8111-111111111111"
+    let otherAci = "bbbbbbbb-2222-4222-8222-222222222222"
+    let own = StoredConversation(
+        id: "aci:\(ownAci)", kind: "direct", name: nil, unread: 0, muted: false, lastMessageTs: 0
+    )
+    let other = StoredConversation(
+        id: "aci:\(otherAci)", kind: "direct", name: nil, unread: 0, muted: false, lastMessageTs: 0
+    )
+    let state = await AppState(environment: .staging)
+    await MainActor.run { state.linkedAci = ownAci }
+    let ownTitle = await MainActor.run { state.conversationTitle(for: own) }
+    // No stack: falls back to the raw ACI (live, the name would show).
+    let otherTitle = await MainActor.run { state.conversationTitle(for: other) }
+    check(
+        "MessagingTests.testNoteToSelfTitle",
+        ownTitle == "Note to Self" && otherTitle == otherAci
     )
 }
 #endif

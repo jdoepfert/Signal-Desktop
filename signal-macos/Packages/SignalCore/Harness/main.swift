@@ -103,6 +103,7 @@ await runAsync("MessagingTests") {
     await runUnauthChatTests()
     #if os(macOS)
     await runConversationViewModelTests()
+    await runNoteToSelfTests()
     runBuildInfoTests()
     runKeychainTests()
     #endif

@@ -41,8 +41,8 @@ that is not marked "skip" passes.
 | --- | --- | --- | --- | --- |
 | 1 | `Tools/build-app.sh`, then `open dist/SignalMac.app --args --production`. A QR code shows. On the phone: **Settings, Linked devices, Link new device**, scan it. | The app reaches the conversation list. It is **empty** at first (no conversations until a message arrives). | | |
 | 2 | Quit the app (Cmd-Q) and open it again. | No QR code; the app opens straight to the (still empty) list. The Mac still appears under Linked devices on the phone. | | |
-| 3 | **Receive first.** On the phone, send yourself a **Note to Self** ("hello from phone"). | A conversation appears on the Mac within 5 seconds (titled with your own account id) and shows the text. | | |
-| 4 | Ask a real contact to **message you** ("hi Mac"). | A second conversation appears (titled with their account id) with their text. | | |
+| 3 | **Receive first.** On the phone, send yourself a **Note to Self** ("hello from phone"). | A conversation appears on the Mac within 5 seconds, titled **Note to Self**, and shows the text. | | |
+| 4 | Ask a real contact to **message you** ("hi Mac"). | A second conversation appears, titled with their name (raw account id only if they have no reachable profile), with their text. | | |
 | 5 | In that conversation, **reply from the Mac**. | The contact receives the reply, and the phone shows it as sent in its thread with that contact. | | |
 | 6 | In the Note to Self conversation, **send a Note to Self from the Mac**. | It appears in the phone's Note to Self thread within 5 seconds, as your own message (not as an incoming one). | | |
 | 7 | The contact replies. Then quit the app, have the contact send **3 messages**, and relaunch. | The reply arrives. After relaunch all 3 messages are there, in order. The conversation title is the account id (known limitation, not a failure). | | |

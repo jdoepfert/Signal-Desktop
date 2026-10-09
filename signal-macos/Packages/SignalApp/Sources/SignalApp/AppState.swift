@@ -90,7 +90,16 @@ public final class AppState: ObservableObject {
     /// Alert policy for inbound messages; `locked` flips to title-only
     /// when the device locks (device-lock wiring arrives later).
     private let notificationPolicy = NotificationPolicy()
-    private let notifications = Notifications()
+    /// Lazy: `Notifications()` touches `UNUserNotificationCenter`, which
+    /// traps outside a running app (e.g. the test harness). First use is
+    /// always post-link, in the app.
+    private lazy var notifications: Notifications = {
+        let notifications = Notifications()
+        notifications.onTap = { [weak self] conversationId in
+            self?.select(conversationId)
+        }
+        return notifications
+    }()
 
     public init(environment: AppEnvironment) {
         self.environment = environment
@@ -105,9 +114,6 @@ public final class AppState: ObservableObject {
             Task {
                 await self?.send(text: text)
             }
-        }
-        notifications.onTap = { [weak self] conversationId in
-            self?.select(conversationId)
         }
     }
 
@@ -324,6 +330,10 @@ public final class AppState: ObservableObject {
     }
 
     public func conversationTitle(for conversation: StoredConversation) -> String {
+        // Desktop titles the self thread "Note to Self", never a name or UUID.
+        if let linkedAci, conversation.id.lowercased() == "aci:\(linkedAci.lowercased())" {
+            return "Note to Self"
+        }
         if let name = conversation.name, !name.isEmpty {
             return name
         }
@@ -414,6 +424,14 @@ public final class AppState: ObservableObject {
             accounts: AccountTable(queue: database.queue)
         )
         let creds = try await registration.register(account: account, environment: netEnv)
+        // Desktop keeps the account's own profile key on the self
+        // conversation: without it the self profile is unreachable and
+        // Note to Self shows a UUID. Best-effort: a failed write must not
+        // fail the link (names degrade to ACI).
+        try? ContactTable(queue: database.queue).setProfileKey(
+            aci: creds.aci.lowercased(),
+            profileKey: account.profileKey
+        )
         try await assemble(credentials: creds, database: database, unauth: unauth)
     }
 
