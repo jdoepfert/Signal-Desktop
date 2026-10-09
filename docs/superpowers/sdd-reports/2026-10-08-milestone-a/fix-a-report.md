@@ -1,0 +1,82 @@
+# Fix round A report (F1-F5)
+
+Status: DONE_WITH_CONCERNS
+
+## Commits
+- a07050c  milestone-a fix: harvest profile keys; authenticated prekey fetch fallback; authenticated sender certificate (F1 + F2)
+- cee3537  milestone-a fix: acked-then-dropped envelopes leave a placeholder and permanent failures are not retried (F3)
+- 329d02c  milestone-a fix: changed-identity sends can be accepted and resent; device link request matches Desktop (F4 + F5, M2)
+
+F1 and F2 share SendTests.swift, AppState.swift and SessionSetup.swift, so they are one commit (3 commits, not 4).
+
+## Lane
+Baseline: 145 PASS lines. Final: `Tools/linux-lane.sh` exit 0, 167 PASS lines, ALL CHECKS PASSED, no warnings under Packages/ with `-strict-concurrency=complete` (one harness warning I introduced was fixed before the last run).
+Note the harness filter is a substring of the GROUP name (`ReceiveTests`, `SendTests`, `MessagingTests`), not of a test name.
+
+## F1 (C1): first contact can initiate a send
+- `StoreTransaction.setProfileKey(aci:profileKey:)`: ignores anything that is not 32 bytes; called inside the receive transaction (`EnvelopeReceiver.handle`) from `ContentMapping.profileKey(from:context:)`. It runs for every inbound dataMessage, including PROFILE_KEY_UPDATE (flag 4), which produces no message row. It also runs when the message row itself dedupes.
+- **Deviation from the brief (sync transcript).** The brief asked to persist `SyncMessage.Sent.message.profileKey` into `contacts.profile_key`. That key is OUR profile key (the one the recipient would harvest). Desktop treats it as `profileSharing`, not `setProfileKey` (`ts/messages/handleDataMessage.preload.ts:686-696`). Storing it against the destination would derive a wrong access key for every contact we have written to. Implemented: transcript keys, and any message from our own ACI, are NOT stored. `testSyncTranscriptProfileKeyIgnored` asserts that (the brief's name was `testSyncTranscriptProfileKeyPersisted`). If you really want it stored somewhere, it belongs on our own identity row, which already holds our profile key.
+- `LivePreKeyService(keys:authenticatedSend:)` (SessionSetup.swift): Desktop's `getServerKeys` order. With an access key: unauthenticated fetch first; on `SignalError.requestUnauthorized` (libsignal's 401/403), or with no access key at all, an authenticated `GET /v2/keys/{aci}/{device|*}` via `ChatSession.send`. One request per device id for a specific-device fetch. 404 -> `SendError.unregisteredUser`, 401/403 -> `.unauthorized`, other -> `.server(status:)`. `LivePreKeyService.parseKeysResponse` decodes Desktop's `ServerKeyResponseSchema` (one-time EC prekey optional; signed + Kyber required; padded or unpadded base64). Without `authenticatedSend` the old unrestricted unauthenticated behavior is kept (existing call sites).
+- Tests (all PASS): `ReceiveTests.testInboundProfileKeyPersisted` (also PROFILE_KEY_UPDATE), `testSyncTranscriptProfileKeyIgnored`, `testNon32ByteProfileKeyIgnored` (0/16/31/33 bytes, existing key not overwritten); `SendTests.testFirstContactWithoutProfileKeyUsesAuthenticatedFetch` (exactly one `GET /v2/keys/<aci>/*`, zero unauthenticated calls, sessions for 1-3, authenticated send), `testUnauthorizedAccessKeyFetchFallsBackToAuthenticated` (scripted 401 -> exactly one unauth call + exactly one authenticated fetch, session established), `testAccessKeyFetchPreferredWhenAccepted`, `testAuthenticatedFetchStatusMapping`.
+- RED: `Tools/linux-lane.sh ReceiveTests` with the implementation stashed: `FAIL ReceiveTests.testInboundProfileKeyPersisted afterText=nil` (the two negative tests pass trivially without the feature, as expected). The fetch tests were compile-RED (`LivePreKeyService(keys:authenticatedSend:)` did not exist).
+- Mutation: replacing the authenticated fallback with `throw SendError.unauthorized` fails `testFirstContactWithoutProfileKeyUsesAuthenticatedFetch`, `testUnauthorizedAccessKeyFetchFallsBackToAuthenticated` and `testAuthenticatedFetchStatusMapping` (3 FAIL). Dropping the `setProfileKey` call fails `testInboundProfileKeyPersisted` (see RED).
+
+## F2 (I2): authenticated sender certificate
+- `SenderCertFetcher(send:)` now takes the authenticated `ChatRequest` send closure and does the whole fetch + parse (`GET /v1/certificate/delivery?includeE164=false`, `{certificate: base64}`). `includeE164=false` is Desktop's `omitE164` request; this account never shares a number, and it avoids putting our E164 in every sealed-sender certificate. That makes the path `/v1/certificate/delivery?includeE164=false`, not the bare path the brief quoted.
+- AppState (macOS): `chat` is created before the fetcher and `SenderCertFetcher(send: { try await chat.send($0) })` replaces the unauthenticated closure; `LivePreKeyService` also gets `authenticatedSend`.
+- Leading slashes: `/v1/devices/link` (LinkedDeviceRegistration + its existing test) and the cert path.
+- `OutgoingSender.buildRequest`: the silent fallback now logs at error level `sender certificate unavailable (<ErrorType>); sending authenticated`, error type only.
+- Tests: `SendTests.testSenderCertFetcherRequestAndParsing` (method GET, path, parse, 401 -> `.rejected(401)`), `testCertFetchFailureFallsBackAndLogs` (falls back to authenticated, exactly one error log line with the type, no ACI in it), `MessagingTests.testLinkedRegistration` asserts `/v1/devices/link`.
+
+## F3 (I1): acked-then-dropped envelopes
+- `EnvelopeReceiver` classifies failures:
+  - duplicate (`duplicatedMessage`): delete the row, no placeholder (unchanged).
+  - permanent: `wrongDestination`, `unsupportedType`, sealed inner SENDERKEY (`unsupportedMessageType`) -> `kind='unsupported'`; `missingSource`, `invalidContent`, `untrustedSender`, `unexpectedSender` -> `kind='undecryptable'`. No retry: in ONE transaction the placeholder is inserted and the unprocessed row deleted. If that transaction fails, the row stays and the next replay (cap) retries it, so there is no loss window.
+  - everything else (bad MAC/no session/db errors, bad padding, unparseable envelope): rolled back, row kept with the attempts counter. At the cap (`replayUnprocessed`, attempts >= 3) the placeholder (`undecryptable`) is written before the delete.
+  - Deliberate: unparseable envelopes and bad padding stay retryable. The pre-existing tests `testReplayDropsAfterMaxAttempts` (garbage bytes) and `testPaddingFailureKeepsNothingAndDoesNotCrash` require that (brief: existing tests unchanged); no sender is knowable for the former anyway.
+- Sender for the placeholder is found WITHOUT decrypting content: plaintext envelopes use the envelope source; sealed sender opens only the outer layer (read-only) and requires the certificate to validate against a trust root (so a forged envelope cannot plant a placeholder under someone's name; `testUnvalidatedSenderGetsNoPlaceholder`). Unknown sender -> row deleted, redacted log line, no placeholder. Placeholder: empty body, conversation = sender's 1:1, `sent_timestamp` = envelope SERVER timestamp (never the sender's sent timestamp, so a later legitimate resend with the real timestamp cannot be deduped away), unread bump and a `received` stream event.
+- PNI decision (also in a code comment on `permanentKind`): drop-with-placeholder is accepted for Milestone A; PNI-addressed messages are not decrypted. Sealed PNI messages have no recoverable sender, so they are dropped without a placeholder (logged). DecryptionErrorMessage retry requests are NOT implemented (documented).
+- Destination check now covers both fields: string (if non-empty) and `destinationServiceIdBinary` (16 raw bytes must equal our ACI; the 17-byte `0x01+uuid` PNI form and any other ACI are rejected before any decrypt).
+- UI (macOS-only, unverified on Linux for the view wiring; the logic is Linux-tested): `StoredMessage.displayBody` / `MessageKind.displayBody(kind:body:)` return "Message could not be shown" for an empty `unsupported`/`undecryptable` row. `ThreadMessage.init(stored)`, `AppState.reloadThread` and the notification body use it. Test: `ReceiveTests.testPlaceholderDisplayText`.
+- Tests: `testPniEnvelopePlaceholderNotRetried` (+ `testPniSealedDroppedWithoutPlaceholder`), `testSenderKeyEnvelopePlaceholder` (real sealed-sender SENDERKEY built with libsignal `groupEncrypt`), `testUnvalidatedSenderGetsNoPlaceholder`, `testDecryptFailureAtCapWritesPlaceholder` (flips the last byte of a valid PreKey ciphertext: real bad MAC, rollback asserted: no session/identity, attempts 1 -> 3, no placeholder before the cap, placeholder after), `testSealedDecryptFailureAtCapUsesCertificateSender` (outer layer opens, inner one-time prekey missing), `testBinaryDestinationMismatchRejected` (other ACI, PNI binary, then our own binary ACI decrypts).
+- Mutation: disabling the placeholder insert in `dropWithPlaceholder` fails 6 checks (PNI, SenderKey, Unvalidated, DecryptFailureAtCap, SealedDecryptFailureAtCap, BinaryDestination).
+
+## F4 (I3): changed identity on send
+- `SendError.untrustedIdentity(String)` is replaced by `SendError.identityChanged(String)` (plus `.noSuchMessage`); the one existing test using it was updated. The typed error is now also produced from the 410/409 repair refetch (`repairTranslatingIdentity`); before, a changed key found while re-fetching a re-registered device (the usual way to meet it) escaped as a raw libsignal error. Sessions are archived, as before.
+- `OutgoingSender.acceptNewIdentity(aci:)`: archives all sessions, fetches the CURRENT bundles, saves the identity key each bundle presents (`saveIdentity` inside the same transaction, just before `processPreKeyBundle`) and starts sessions from that SAME fetch, so a retry does not fetch again or burn more one-time prekeys. The pending key therefore comes from the fetched bundle, as the brief says, without keeping pending state across calls.
+- `OutgoingSender.resendText(timestamp:to:)` re-sends the failed row under its own timestamp (new `MessageStore.message(senderAci:timestamp:)`), so the thread keeps one row.
+- AppState / ContentView (macOS, UNVERIFIED on Linux): `identityPrompt: IdentityChangePrompt?` set when `sendText` throws `identityChanged`, SwiftUI `.alert("Safety number changed")` with "Safety number changed for <name>. Send anyway?", "Send anyway" -> `acceptIdentityChange(prompt)` (prompt captured so the alert dismissal cannot clear it first) -> accept + resend; "Cancel" dismisses.
+- Receive still trusts changed identities: `testReinstalledContactStillReceived` and `testTrustDirection` unchanged and passing.
+- Tests: `testChangedIdentitySendThrowsIdentityChanged` (410 + re-registered devices with a new identity), the updated `testSendToChangedIdentityThrows` (encrypt-stage path), `testAcceptNewIdentityThenSendSucceeds` (new key saved, exactly one extra fetch for the accept, none for the retry, send OK), `testResendAfterAcceptKeepsOneRow`.
+- Mutations: not saving the presented identity in accept fails `testAcceptNewIdentityThenSendSucceeds` and `testResendAfterAcceptKeepsOneRow`; removing the typed translation in the repair path fails `testChangedIdentitySendThrowsIdentityChanged` and both accept tests.
+
+## F5 (I4): link request
+- `DeviceName` (SignalCore/DeviceName.swift): port of `encryptDeviceName`/`decryptDeviceName` (ECDH with the ACI identity public key, HMAC "auth"/"cipher", AES-256-CTR via libsignal `Aes256Ctr32`, `DeviceName` protobuf hand-encoded: three length-delimited fields). New golden vector `Vectors/device-name.json` generated by `Tools/vectors/generate.mjs` (deterministic: seeded ephemeral and identity keys, Desktop's `protos/DeviceName.proto`, self-checked decrypt). `testDeviceNameVector`: our encrypt with the vector's ephemeral key reproduces Desktop's bytes exactly, decrypt works, a tampered byte is rejected. The generator rewrote `envelopes.json` (random by design), which I reverted; only the new vector file and generator/README changed.
+- `LinkedDeviceRegistration`: `accountAttributes.name` = base64 DeviceName of "Signal Desktop (macOS native)" (`defaultDeviceName`, injectable), capabilities `attachmentBackfill, spqr, usernameChangeSyncMessage, optionalPhoneNumber`. `optionalPhoneNumber` is `!hasE164`, and this flow is always the hasE164 path (it sends PNI keys and registration id like Desktop's hasE164 branch), so it is sent as `false`.
+- Test: `MessagingTests.testLinkRequestIncludesNameAndCapabilities` (decodes the JSON body, asserts exact capability set, name decrypts with the ACI identity private key and NOT with the PNI one, the plaintext name does not appear in the body). Mutation: forcing no name fails it.
+
+## Minor
+- M2 done: the sent-sync transcript goes out `urgent: false` (`testSyncTranscriptIsNotUrgent`).
+- M5 skipped: a redelivered PREKEY (`invalidKeyId`/"reused base key") after commit still lingers until the cap and then writes an `undecryptable` placeholder, which is slightly worse than before for that edge (a false placeholder next to the real message). Detecting it needs the (sender, sent_timestamp) which is only known after a successful decrypt. Cheap mitigation for a later pass: at the cap, skip the placeholder when the sender already has a message with the envelope's `clientTimestamp`.
+
+## Files
+New: `Packages/SignalCore/Sources/SignalCore/DeviceName.swift`, `Packages/SignalCore/Harness/Vectors/device-name.json`.
+Modified: SignalCore {EnvelopeReceiver, ContentMapping, OutgoingSender}.swift; SignalStorage {StoreTransaction, MessageStore}.swift; SignalMessaging {SessionSetup, SenderCertFetcher, LinkedDeviceRegistration}.swift; SignalApp {AppState, ContentView, ConversationViewModel}.swift; Harness {ReceiveTests, SendTests, LinkedRegistrationTests, main}.swift; Tools/vectors/{generate.mjs, README.md}.
+
+## macOS-only / unverified on Linux
+`Packages/SignalApp/Sources/SignalApp/AppState.swift`, `ContentView.swift`, `ConversationViewModel.swift` are compiled out on Linux and were NOT compiled: `chat` moved above the cert fetcher, `LivePreKeyService(keys:authenticatedSend:)`, `SenderCertFetcher(send:)`, `identityPrompt` state, `acceptIdentityChange(_:)`, the SwiftUI `.alert(_:isPresented:presenting:actions:message:)` usage (macOS 12+; target is macOS 13), `displayBody` uses. Please compile on macOS and check for strict-concurrency warnings on those closures.
+
+## What the live path assumes (not coverable by tests)
+- libsignal's `UnauthKeysService.getPreKeys` surfaces an access-key refusal as `SignalError.requestUnauthorized` (read from `Error.swift`, 401 mapping). A 403 from that endpoint is not mapped by me; if libsignal reports it as another error, the fallback will not trigger on it (Desktop treats 401 and 403 alike).
+- The authenticated `GET /v2/keys/{aci}/{device|*}` over `AuthenticatedChatConnection.send` returns the documented JSON and 200; the real socket round trip, header auth and path form (leading slash, matching the existing `/v1/messages/...` request) are unexercised.
+- `GET /v1/certificate/delivery?includeE164=false` over the authenticated socket is accepted by the server with the query string; the response key is `certificate` (Desktop's `validateResponse`).
+- The server accepts `accountAttributes.name` as base64 of the DeviceName proto and the four-key capability map, with PNI fields present and `optionalPhoneNumber: false` (the review's I4 point stands for the first live link attempt).
+- `ChatSession.send` is connected before the first send needs the certificate or prekeys (AppState connects right after assembling the stack; before then the cert fetch fails, logs, and the send goes out authenticated).
+- Sealed-sender senderkey inner messages and unknown future outer envelope types are assumed to surface as `SealedSenderHelperError.unsupportedMessageType` / `EnvelopeError.unsupportedType`; verified only with a locally built SENDERKEY inner message.
+
+## Concerns
+1. The sync-transcript profile key decision above departs from the brief on purpose; please confirm.
+2. `acceptNewIdentity` trusts whatever key the server presents right now (no safety-number display), which is the minimum Desktop-like "accept" and not yet a verification UI.
+3. Permanent failures write a placeholder for the visible sender only; sealed-sender envelopes whose outer layer cannot be opened (or to a PNI) leave only a log line.
+4. A placeholder is created per unreadable envelope; a burst of undecryptables from one sender yields several rows (deduped only by server timestamp).
+5. M5 above.
