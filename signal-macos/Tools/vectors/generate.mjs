@@ -115,6 +115,44 @@ const profileKey = seeded('profile-key', 32);
   });
 }
 
+// --- Profile version + sealed name (mirror of ts/Crypto.node.ts decryptProfile)
+// Deterministic: seeded key, ACI and IV. Plaintext is `given\0family`
+// zero-padded; output is IV (12 bytes) + AES-256-GCM ciphertext+tag.
+{
+  const aci = ls.Aci.fromUuid('22222222-3333-4444-9555-666666666666');
+  const key = new ProfileKey(profileKey);
+  const version = key.getProfileKeyVersion(aci).toString();
+  const given = 'Ada';
+  const family = 'Lovelace';
+  const plain = Buffer.alloc(64);
+  Buffer.from(`${given}\0${family}`, 'utf8').copy(plain);
+  const iv = seeded('profile-name/iv', 12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', profileKey, iv);
+  const encrypted = Buffer.concat([iv, cipher.update(plain), cipher.final(), cipher.getAuthTag()]);
+
+  // Self-check: decrypt the way Desktop's decryptProfileName does.
+  const data = encrypted;
+  const decIv = data.subarray(0, 12);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', profileKey, decIv);
+  decipher.setAuthTag(data.subarray(12 + 64));
+  const roundTrip = Buffer.concat([
+    decipher.update(data.subarray(12, 12 + 64)),
+    decipher.final(),
+  ]);
+  if (!roundTrip.equals(plain)) {
+    throw new Error('profile name self-check failed');
+  }
+
+  write('profile', {
+    aci: aci.getServiceIdString(),
+    profileKeyHex: hex(profileKey),
+    version,
+    encryptedNameB64: encrypted.toString('base64'),
+    given,
+    family,
+  });
+}
+
 // --- Device name (mirror of ts/Crypto.node.ts encryptDeviceName) -----------
 // Deterministic: the ephemeral key is seeded. The protobuf is Desktop's own
 // protos/DeviceName.proto, encoded with protobufjs.
