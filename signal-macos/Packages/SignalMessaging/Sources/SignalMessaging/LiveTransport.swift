@@ -25,8 +25,7 @@ import SignalLogging
 ///   which cannot be rebuilt from stored bytes, so this path is Desktop's
 ///   `sendMessagesLegacy`: a raw `PUT /v1/messages/{destination}?story=false`
 ///   JSON request over the authenticated socket, mapped from HTTP status.
-public final class LiveTransport: SealedMessageTransport, Sendable {
-    /// Sends one request over the authenticated chat socket.
+public final class LiveTransport: SealedMessageTransport, Sendable {    /// Sends one request over the authenticated chat socket.
     public typealias AuthenticatedSend =
         @Sendable (ChatRequest) async throws -> (status: UInt16, body: Data)
 
@@ -70,7 +69,12 @@ public final class LiveTransport: SealedMessageTransport, Sendable {
     }
 }
 
-extension LiveTransport: MessageSubmitter {
+extension LiveTransport: MessageSubmitter, GroupDistributionSender {
+    /// Group sender-key envelopes ride the sealed sender path.
+    public func sendDistribution(_ envelope: OutboundEnvelope, to recipientAci: String) async throws {
+        try await send(envelope, to: recipientAci)
+    }
+
     fileprivate static let logger = Logger(subsystem: "net", category: "transport")
 
     public func submit(_ request: SendRequest) async throws -> SubmitResult {

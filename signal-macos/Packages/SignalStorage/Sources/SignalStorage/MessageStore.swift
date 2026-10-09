@@ -60,6 +60,8 @@ public enum MessageKind {
     /// session, malformed): a placeholder with an empty body.
     public static let undecryptable = "undecryptable"
     public static let contactSync = "contact-sync"
+    /// Group membership change without chat content (hidden bookkeeping row).
+    public static let groupChange = "group-change"
     /// Phone contact-sync batch (blob pointer in `attachment`); ingested by
     /// the app, never shown in a thread.
 
@@ -117,6 +119,8 @@ public struct NewMessage: Sendable, Equatable {
     public var status: String?
     /// Set when the message carries a file (persisted alongside the row).
     public var attachment: NewAttachment?
+    /// Group membership delta carried by the message (applied revision-gated).
+    public var membership: GroupMembership?
 
     public init(
         senderAci: String,
@@ -129,7 +133,8 @@ public struct NewMessage: Sendable, Equatable {
         expiresAt: UInt64? = nil,
         kind: String = MessageKind.text,
         status: String? = nil,
-        attachment: NewAttachment? = nil
+        attachment: NewAttachment? = nil,
+        membership: GroupMembership? = nil
     ) {
         self.senderAci = senderAci
         self.senderDevice = senderDevice
@@ -142,6 +147,7 @@ public struct NewMessage: Sendable, Equatable {
         self.kind = kind
         self.status = status
         self.attachment = attachment
+        self.membership = membership
     }
 }
 
@@ -221,6 +227,9 @@ public final class MessageStore: Sendable, MessageWriting {
             conversationId: conversationId,
             in: transaction.db
         )
+        if let membership = message.membership {
+            try Self.applyMembership(membership, senderAci: message.senderAci, in: transaction.db)
+        }
         if inserted {
             try transaction.recordMessage(
                 conversationId: conversationId,
@@ -231,12 +240,57 @@ public final class MessageStore: Sendable, MessageWriting {
         return PersistResult(rowId: rowId, conversationId: conversationId, inserted: inserted)
     }
 
+    /// Applies a group membership delta revision-gated: unknown groups
+    /// bootstrap from the sender plus additions; stale revisions are
+    /// ignored (redeliveries must not downgrade the roster).
+    static func applyMembership(
+        _ membership: GroupMembership,
+        senderAci: String,
+        in db: Database
+    ) throws {
+        struct RevisionRow: FetchableRecord {
+            let revision: Int64
+            let membersJson: String
+
+            init(row: Row) {
+                revision = row["revision"]
+                membersJson = row["members_json"]
+            }
+        }
+        let existing = try RevisionRow.fetchOne(
+            db,
+            sql: "SELECT revision, members_json FROM group_state WHERE master_key = ?",
+            arguments: [membership.masterKey]
+        )
+        if let existing {
+            guard Int64(membership.revision) > existing.revision else {
+                return
+            }
+            let current =
+                (try? JSONDecoder().decode([String].self, from: Data(existing.membersJson.utf8))) ?? []
+            let members = Array(
+                Set(current).union(membership.added).subtracting(membership.removed)
+            ).sorted()
+            let encoded = String(data: try JSONEncoder().encode(members), encoding: .utf8) ?? "[]"
+            try db.execute(
+                sql: "UPDATE group_state SET revision = ?, members_json = ? WHERE master_key = ?",
+                arguments: [Int64(membership.revision), encoded, membership.masterKey]
+            )
+            return
+        }
+        let members = Array(Set(membership.added + [senderAci])).sorted()
+        let encoded = String(data: try JSONEncoder().encode(members), encoding: .utf8) ?? "[]"
+        try db.execute(
+            sql: "INSERT INTO group_state (master_key, revision, members_json) VALUES (?, ?, ?)",
+            arguments: [membership.masterKey, Int64(membership.revision), encoded]
+        )
+    }
+
     private static func insert(
         _ message: NewMessage,
         conversationId: String?,
         in db: Database
-    ) throws -> (rowId: Int64, inserted: Bool) {
-        try db.execute(
+    ) throws -> (rowId: Int64, inserted: Bool) {        try db.execute(
             sql: """
                 INSERT INTO messages
                     (sender_aci, sender_device, body, sent_timestamp, conversation_id,

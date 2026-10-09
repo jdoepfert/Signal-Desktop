@@ -233,7 +233,8 @@ public actor EnvelopeReceiver {
     /// dropped WITH a placeholder, not decrypted. The PNI identity and
     /// prekeys are provisioned (stored under prekey id 2) but receiving to
     /// the PNI is out of scope; a placeholder tells the user that something
-    /// arrived. Group (SENDERKEY) messages are the same: unsupported.
+    /// arrived. Group (sender-key) payloads decrypt in `decodeSenderKey`;
+    /// only undecryptable ones fall through here.
     ///
     /// Not implemented, deliberately: Desktop's DecryptionErrorMessage
     /// retry request (asking the sender to resend after a bad MAC / missing
@@ -430,13 +431,6 @@ public actor EnvelopeReceiver {
             throw EnvelopeError.unsupportedType(envelope.type.rawValue)
         }
 
-        let plaintext = try Padding.unpad(padded)
-        let content: SignalServiceProtos_Content
-        do {
-            content = try SignalServiceProtos_Content(serializedBytes: plaintext)
-        } catch {
-            throw EnvelopeError.invalidContent
-        }
         let inbound = InboundContext(
             senderAci: senderAci,
             senderDevice: senderDevice,
@@ -444,6 +438,53 @@ public actor EnvelopeReceiver {
             clientTimestamp: envelope.clientTimestamp,
             envelopeHash: Data(SHA256.hash(data: bytes))
         )
+        do {
+            let plaintext = try Padding.unpad(padded)
+            let content: SignalServiceProtos_Content
+            do {
+                content = try SignalServiceProtos_Content(serializedBytes: plaintext)
+            } catch {
+                throw EnvelopeError.invalidContent
+            }
+            return DecodedEnvelope(
+                message: ContentMapping.message(from: content, context: inbound),
+                profileKey: ContentMapping.profileKey(from: content, context: inbound)
+            )
+        } catch let firstError {
+            // Sender-key fallback on the RAW sealed plaintext (never
+            // unpadded: it already is the sender-key ciphertext, not padded
+            // content). The original error rethrows when the fallback
+            // misses, so 1:1 failure mapping is unchanged.
+            if let senderDevice,
+               let address = try? ProtocolAddress(name: senderAci, deviceId: senderDevice),
+               let groupMessage = try? self.decodeSenderKey(padded, from: address, inbound: inbound)
+            {
+                return groupMessage
+            }
+            throw firstError
+        }
+    }
+
+    /// Sender-key (group) payloads: SKDM processes into the store with no
+    /// row (acked like a delivery receipt); message ciphertext decrypts
+    /// into the normal mapping path. Nil when the bytes are neither.
+    private func decodeSenderKey(
+        _ bytes: Data,
+        from address: ProtocolAddress,
+        inbound: InboundContext
+    ) throws -> DecodedEnvelope? {
+        let context = NullContext()
+        if let skdm = try? SenderKeyDistributionMessage(bytes: bytes) {
+            try processSenderKeyDistributionMessage(skdm, from: address, store: store, context: context)
+            return DecodedEnvelope(message: nil, profileKey: nil)
+        }
+        guard
+            let decrypted = try? groupDecrypt(bytes, from: address, store: store, context: context),
+            let plaintext = try? Padding.unpad(decrypted),
+            let content = try? SignalServiceProtos_Content(serializedBytes: plaintext)
+        else {
+            return nil
+        }
         return DecodedEnvelope(
             message: ContentMapping.message(from: content, context: inbound),
             profileKey: ContentMapping.profileKey(from: content, context: inbound)

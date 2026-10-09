@@ -85,7 +85,8 @@ public struct ContentView: View {
             VStack(spacing: 0) {
                 ThreadView(
                     messages: state.thread.messages,
-                    displayName: { state.cachedName(for: $0) }
+                    displayName: { state.cachedName(for: $0) },
+                    attachments: state.attachmentBytes
                 )
                 Divider()
                 ComposerView(state: state.composer)

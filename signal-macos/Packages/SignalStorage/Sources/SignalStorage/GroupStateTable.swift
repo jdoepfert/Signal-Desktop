@@ -16,6 +16,22 @@ public struct StoredGroupState: Sendable, Equatable {
     }
 }
 
+/// Membership delta carried by one group message: change actions plus the
+/// sender (who is necessarily a member).
+public struct GroupMembership: Sendable, Equatable {
+    public var masterKey: Data
+    public var revision: UInt32
+    public var added: [String]
+    public var removed: [String]
+
+    public init(masterKey: Data, revision: UInt32, added: [String], removed: [String]) {
+        self.masterKey = masterKey
+        self.revision = revision
+        self.added = added
+        self.removed = removed
+    }
+}
+
 /// Group membership state: one row per known group, replaced wholesale on
 /// every revision bump (callers always have the full member list).
 public final class GroupStateTable: Sendable {

@@ -65,7 +65,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 # Desktop's protos carry no swift_prefix; inject one into a scratch copy
 # (never edit protos/) so types come out as SignalServiceProtos_*.
-for f in SignalService DeviceMessages; do
+for f in SignalService DeviceMessages Groups; do
     sed 's|^package signalservice;|package signalservice;\noption swift_prefix = "SignalServiceProtos_";|' \
         "$REPO/protos/$f.proto" > "$WORK/$f.proto"
 done
@@ -74,5 +74,5 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 protoc --plugin=protoc-gen-swift="$PLUGIN" \
     --swift_out="$OUT" --swift_opt=Visibility=Public \
-    -I "$WORK" "$WORK/SignalService.proto" "$WORK/DeviceMessages.proto"
+    -I "$WORK" "$WORK/SignalService.proto" "$WORK/DeviceMessages.proto" "$WORK/Groups.proto"
 echo "gen-protos: generated with swift-protobuf $PINNED into ${OUT#"$ROOT"/}"

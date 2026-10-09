@@ -24,6 +24,8 @@ private struct LiveStack {
     let messages: MessageStore
     let attachments: AttachmentService
     let attachmentTable: AttachmentTable
+    let groups: GroupManager
+    let protocolStore: GRDBProtocolStore
 }
 
 /// Where the app is in its account lifecycle.
@@ -282,9 +284,19 @@ public final class AppState: ObservableObject {
         guard
             let stack,
             let selection,
-            selection.hasPrefix("aci:"),
             !text.isEmpty
         else {
+            return
+        }
+        if selection.hasPrefix("aci:") {
+            await sendDirect(text: text, selection: selection)
+        } else if selection.hasPrefix("group:") {
+            await sendGroup(text: text, selection: selection)
+        }
+    }
+
+    private func sendDirect(text: String, selection: String) async {
+        guard let stack else {
             return
         }
         let aci = String(selection.dropFirst(4))
@@ -306,6 +318,38 @@ public final class AppState: ObservableObject {
             self.error = String(describing: error)
         }
         // Success or failure, the row (sent or failed) is in the store.
+        refreshConversations()
+        await reloadThread()
+    }
+
+    /// Group send: the manager fans out sealed sender-key envelopes, then
+    /// the sent row persists for the thread. Manager failures (unknown
+    /// group) surface as a banner; there is no failed-row retry for groups.
+    private func sendGroup(text: String, selection: String) async {
+        guard let stack, let linkedAci else {
+            return
+        }
+        let hex = String(selection.dropFirst(6))
+        guard let masterKey = Self.masterKey(hex: hex) else {
+            self.error = "Cannot send: malformed group conversation."
+            return
+        }
+        do {
+            let timestamp = try await stack.groups.sendTextToGroup(text, group: masterKey)
+            let message = NewMessage(
+                senderAci: linkedAci.lowercased(),
+                body: text,
+                sentTimestamp: timestamp,
+                target: .group(masterKey: masterKey),
+                kind: MessageKind.text,
+                status: MessageStatus.sent
+            )
+            try stack.protocolStore.withTransaction { transaction in
+                _ = try stack.messages.persist(message, in: transaction)
+            }
+        } catch {
+            self.error = String(describing: error)
+        }
         refreshConversations()
         await reloadThread()
     }
@@ -406,6 +450,11 @@ public final class AppState: ObservableObject {
         }
         if let name = conversation.name, !name.isEmpty {
             return name
+        }
+        // Server group titles arrive with a later milestone; until then a
+        // stable short handle instead of the raw id.
+        if conversation.kind == "group", conversation.id.hasPrefix("group:") {
+            return "Group \(conversation.id.dropFirst(6).prefix(8))"
         }
         if conversation.id.hasPrefix("aci:") {
             return cachedName(for: String(conversation.id.dropFirst(4)))
@@ -605,6 +654,7 @@ public final class AppState: ObservableObject {
         let conversations = ConversationStore(queue: database.queue)
         let contactTable = ContactTable(queue: database.queue)
         let attachmentTable = AttachmentTable(queue: database.queue)
+        let groupTable = GroupStateTable(queue: database.queue)
         let cdn = LiveCDNClient(
             environment: environment,
             formSend: { [chat] request in try await chat.send(request) }
@@ -633,6 +683,16 @@ public final class AppState: ObservableObject {
             contacts: contactTable,
             profiles: ProfileFetcher { aci in try await liveProfiles.fetchProfile(for: aci) }
         )
+        let ourAddress = try ProtocolAddress(name: creds.aci, deviceId: creds.deviceId)
+        let groupSessions = SessionSetup(keys: keyService, store: protocolStore, ourAddress: ourAddress)
+        let groupManager = GroupManager(
+            store: protocolStore,
+            groups: groupTable,
+            ourAddress: ourAddress,
+            certs: certs,
+            sessions: groupSessions,
+            sender: live
+        )
         stack = LiveStack(
             database: database,
             pipe: pipe,
@@ -644,7 +704,9 @@ public final class AppState: ObservableObject {
             contacts: contacts,
             messages: messages,
             attachments: attachmentService,
-            attachmentTable: attachmentTable
+            attachmentTable: attachmentTable,
+            groups: groupManager,
+            protocolStore: protocolStore
         )
         linkedAci = creds.aci
         phase = .linked
@@ -869,6 +931,24 @@ public final class AppState: ObservableObject {
 
     private static func nowMs() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private static func masterKey(hex: String) -> Data? {
+        guard hex.count == 64, hex.allSatisfy(\.isHexDigit) else {
+            return nil
+        }
+        var bytes = Data()
+        bytes.reserveCapacity(32)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else {
+                return nil
+            }
+            bytes.append(byte)
+            index = next
+        }
+        return bytes
     }
 
     private static func databasePath(environment: AppEnvironment) -> String {

@@ -11,23 +11,18 @@ private let groupAlice = "9d0652a3-dcc3-4d11-975f-74d61598733f"
 private let groupBob = "6838237D-02F6-4098-B110-698253D15961"
 private let groupCarol = "8e7b8c8d-9e8f-4a4b-8c8d-9e8f8a8b8c8d"
 
-/// Scripted group transport: captures distributions + group ciphertexts,
-/// optionally fails one group send with a membership change.
+/// Scripted group transport: captures sealed per-device envelopes,
+/// optionally failing one send with a membership change.
 final class FakeGroupSender: GroupDistributionSender, @unchecked Sendable {
-    nonisolated(unsafe) var distributions = [(aci: String, device: UInt32, envelope: Data)]()
-    nonisolated(unsafe) var groupSends = [(ciphertext: Data, group: Data)]()
-    nonisolated(unsafe) var failNextGroupSend = false
+    nonisolated(unsafe) var sends = [(aci: String, envelope: OutboundEnvelope)]()
+    nonisolated(unsafe) var failNextSend = false
 
-    func sendDistribution(_ envelope: Data, to recipientAci: String, deviceId: UInt32) async throws {
-        distributions.append((recipientAci, deviceId, envelope))
-    }
-
-    func sendGroupMessage(_ ciphertext: Data, group: Data) async throws {
-        if failNextGroupSend {
-            failNextGroupSend = false
+    func sendDistribution(_ envelope: OutboundEnvelope, to recipientAci: String) async throws {
+        sends.append((recipientAci, envelope))
+        if failNextSend {
+            failNextSend = false
             throw GroupSendError.membershipChanged
         }
-        groupSends.append((ciphertext, group))
     }
 }
 
@@ -147,9 +142,9 @@ func runGroupTests() async {
         )
         try manager.joinKnownGroup(masterKey: masterKey, revision: 1, members: [groupAlice, groupBob])
 
-        // First send distributes to bob, then sends once.
+        // First send distributes to bob, then sends once (both sealed).
         try await manager.sendTextToGroup("hi", group: masterKey)
-        let afterFirst = (sender.distributions.count, sender.groupSends.count)
+        let afterFirst = sender.sends.count
 
         // Second send reuses the distribution.
         try await manager.sendTextToGroup("hi again", group: masterKey)
@@ -164,8 +159,8 @@ func runGroupTests() async {
             sessions: SessionSetup(keys: fakeKeys, store: bobStore, ourAddress: bobAddress),
             sender: sender
         )
-        let skdmEnvelope = sender.distributions.first!.envelope
-        // Distribution envelopes carry the raw SKDM bytes.
+        let skdmEnvelope = sender.sends[0].envelope.bytes
+        // Distribution envelopes carry session-sealed SKDM bytes.
         let skdmBytes = try sealedSenderDecrypt(
             skdmEnvelope,
             to: bobAddress,
@@ -175,8 +170,16 @@ func runGroupTests() async {
             context: context
         )
         try bobManager.receiveDistribution(skdmBytes, from: aliceAddress)
+        let messageBytes = try sealedSenderDecrypt(
+            sender.sends[1].envelope.bytes,
+            to: bobAddress,
+            from: aliceAddress,
+            recipientStore: bobStore,
+            trustRoot: trustKeys.publicKey,
+            context: context
+        )
         let received = try bobManager.receiveGroupMessage(
-            sender.groupSends.first!.ciphertext,
+            messageBytes,
             from: aliceAddress
         )
 
@@ -187,18 +190,17 @@ func runGroupTests() async {
             revision: 2,
             members: [groupAlice, groupBob, groupCarol]
         )
-        sender.failNextGroupSend = true
+        sender.failNextSend = true
         try await manager.sendTextToGroup("welcome", group: masterKey)
-        let carolDistributions = sender.distributions.filter { $0.aci == groupCarol }
+        let carolSends = sender.sends.filter { $0.aci == groupCarol }
 
         check(
             "MessagingTests.testGroupSend",
-            afterFirst == (1, 1)
-                && sender.distributions.count == 2
-                && sender.groupSends.count == 3
+            afterFirst == 2
+                && sender.sends.count == 7
                 && received.body == "hi"
                 && received.senderAci == groupAlice
-                && carolDistributions.count == 1
+                && carolSends.count == 3
         )
     } catch {
         check("MessagingTests.testGroupSend", false, "\(error)")

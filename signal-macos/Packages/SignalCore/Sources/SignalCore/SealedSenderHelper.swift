@@ -177,6 +177,11 @@ private func decryptInnerContent(
         // Decryption-error receipts travel as plaintext content inside a
         // sealed-sender envelope; the body is the (padded) Content bytes.
         return try PlaintextContent(bytes: content.contents).body
+    case .senderKey:
+        // Sender-key payloads (SKDM distributions and group ciphertext)
+        // decrypt in the envelope fallback (`decodeSenderKey`), which
+        // needs the raw bytes; pass them through untouched.
+        return content.contents
     default:
         throw SealedSenderHelperError.unsupportedMessageType
     }

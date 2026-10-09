@@ -90,6 +90,19 @@ enum ContentMapping {
         guard let built = build(dataMessage, context: context) else {
             return nil
         }
+        // Membership-only protocol chatter hides in the bookkeeping thread.
+        if built.body.isEmpty, built.attachment == nil, built.membership != nil {
+            return NewMessage(
+                senderAci: context.senderAci,
+                senderDevice: context.senderDevice,
+                body: "",
+                sentTimestamp: built.timestamp,
+                target: .sync,
+                envelopeHash: context.envelopeHash,
+                kind: MessageKind.groupChange,
+                membership: built.membership
+            )
+        }
         return NewMessage(
             senderAci: context.senderAci,
             senderDevice: context.senderDevice,
@@ -99,7 +112,8 @@ enum ContentMapping {
             envelopeHash: context.envelopeHash,
             expireTimer: built.expireTimer,
             kind: built.unsupported ? MessageKind.unsupported : MessageKind.text,
-            attachment: built.attachment
+            attachment: built.attachment,
+            membership: built.membership
         )
     }
 
@@ -213,6 +227,8 @@ enum ContentMapping {
         var target: ConversationTarget?
         /// The first usable attachment pointer, if any.
         var attachment: NewAttachment?
+        /// Group membership delta, when the message carries group context.
+        var membership: GroupMembership?
     }
 
     /// Flags (end session, timer update, profile key update) carry no
@@ -229,18 +245,29 @@ enum ContentMapping {
         }
         let attachment = Self.attachment(from: dataMessage)
         let unsupported = (attachment == nil && !dataMessage.attachments.isEmpty)
-            || dataMessage.hasGroupV2
             || dataMessage.hasReaction
             || dataMessage.hasQuote
             || dataMessage.hasSticker
             || dataMessage.hasPollCreate
         let body = dataMessage.hasBody ? dataMessage.body : ""
-        guard !body.isEmpty || unsupported || attachment != nil else {
-            return nil
-        }
+        // Group context threads like any other content: a group text (or
+        // file) renders; bodyless protocol chatter without membership info
+        // drops silently.
         var target: ConversationTarget?
+        var membership: GroupMembership?
         if dataMessage.hasGroupV2, dataMessage.groupV2.masterKey.count == 32 {
-            target = .group(masterKey: dataMessage.groupV2.masterKey)
+            let masterKey = dataMessage.groupV2.masterKey
+            target = .group(masterKey: masterKey)
+            let changeBytes = dataMessage.groupV2.hasGroupChange ? dataMessage.groupV2.groupChange : nil
+            membership = GroupStateService.membership(
+                masterKey: masterKey,
+                revision: dataMessage.groupV2.revision,
+                senderAci: context.senderAci,
+                changeBytes: changeBytes
+            )
+        }
+        guard !body.isEmpty || unsupported || attachment != nil || membership != nil else {
+            return nil
         }
         let ts = timestampOverride.flatMap { $0 != 0 ? $0 : nil }
             ?? timestamp(of: dataMessage, fallback: context.clientTimestamp)
@@ -251,7 +278,8 @@ enum ContentMapping {
             expireTimer: dataMessage.hasExpireTimer && dataMessage.expireTimer > 0
                 ? dataMessage.expireTimer : nil,
             target: target,
-            attachment: attachment
+            attachment: attachment,
+            membership: membership
         )
     }
 

@@ -37,6 +37,8 @@ func runReceiveTests() async {
     await testUnsupportedPlaceholder()
     await testAttachmentMessageMapsToRow()
     await testSyncContactsPersistAsSyncRow()
+    await testGroupMessageMapsToThread()
+    await testSenderKeyMessageLandsInGroupThread()
     await testSentSyncLandsInDestinationThread()
     await testSentSyncFromOtherSenderIgnored()
     await testPaddingFailureKeepsNothingAndDoesNotCrash()
@@ -335,6 +337,134 @@ private func testSyncContactsPersistAsSyncRow() async {
         )
     } catch {
         check("ReceiveTests.testSyncContactsPersistAsSyncRow", false, "\(error)")
+    }
+}
+
+private func testGroupMessageMapsToThread() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let ts: UInt64 = 1_700_000_400_000
+        let masterKey = Data(repeating: 0x0C, count: 32)
+        var groupV2 = SignalServiceProtos_GroupContextV2()
+        groupV2.masterKey = masterKey
+        groupV2.revision = 2
+        var groupMessage = SignalServiceProtos_DataMessage()
+        groupMessage.body = "hello group"
+        groupMessage.timestamp = ts
+        groupMessage.groupV2 = groupV2
+        var content = SignalServiceProtos_Content()
+        content.dataMessage = groupMessage
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try content.serializedData(),
+                clientTimestamp: ts
+            )
+        ))
+        let stored = try rig.messages.all().last
+        try checkT(
+            "ReceiveTests.testGroupMessageMapsToThread",
+            stored?.kind == "text"
+                && stored?.body == "hello group"
+                && stored?.conversationId == "group:" + masterKey.map({ String(format: "%02x", $0) }).joined()
+                && acks.allExactlyOnce,
+            "stored=\(String(describing: stored))"
+        )
+    } catch {
+        check("ReceiveTests.testGroupMessageMapsToThread", false, "\(error)")
+    }
+}
+
+// Full sender-key path: SKDM arrives sealed (no row, session established),
+// then the sender-key ciphertext decrypts into the group thread.
+private func testSenderKeyMessageLandsInGroupThread() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let root = IdentityKeyPair.generate()
+        let server = IdentityKeyPair.generate()
+        let masterKey = Data(repeating: 0x0D, count: 32)
+        let distributionId = UUID()
+        let ts: UInt64 = 1_700_000_500_000
+        func sealedGroupEnvelope(_ message: CiphertextMessage, timestamp: UInt64) throws -> Data {
+            let usmc = try UnidentifiedSenderMessageContent(
+                message,
+                from: peer.senderCertificate(root: root, server: server),
+                contentHint: .default,
+                groupId: []
+            )
+            let sealed = try LibSignalClient.sealedSenderEncrypt(
+                usmc,
+                for: rig.address,
+                identityStore: peer.store,
+                context: NullContext()
+            )
+            return try wrapInEnvelope(
+                type: .unidentifiedSender,
+                content: sealed,
+                destination: rig.ourAci,
+                clientTimestamp: timestamp
+            )
+        }
+        let skdm = try SenderKeyDistributionMessage(
+            from: peer.address,
+            distributionId: distributionId,
+            store: peer.store,
+            context: NullContext()
+        )
+        var groupV2 = SignalServiceProtos_GroupContextV2()
+        groupV2.masterKey = masterKey
+        groupV2.revision = 3
+        var groupMessage = SignalServiceProtos_DataMessage()
+        groupMessage.body = "hi group"
+        groupMessage.timestamp = ts
+        groupMessage.groupV2 = groupV2
+        var content = SignalServiceProtos_Content()
+        content.dataMessage = groupMessage
+        let ciphertext = try groupEncrypt(
+            Padding.pad(try content.serializedData()),
+            from: peer.address,
+            distributionId: distributionId,
+            store: peer.store,
+            context: NullContext()
+        )
+        let receiver = try rig.receiver(trustRoots: [root.publicKey])
+        let acks = AckCounter()
+        // SKDM travels sealed (inner session ciphertext, like 1:1 sends).
+        let skdmSealed = try sealedSenderEncrypt(
+            skdm.serialize(),
+            from: peer.senderCertificate(root: root, server: server),
+            to: rig.address,
+            senderStore: peer.store,
+            context: NullContext()
+        )
+        await receiver.process(acks.envelope(try wrapInEnvelope(
+            type: .unidentifiedSender,
+            content: skdmSealed,
+            destination: rig.ourAci,
+            clientTimestamp: ts
+        )))
+        let afterSkdm = try rig.messages.all()
+        await receiver.process(acks.envelope(try sealedGroupEnvelope(ciphertext, timestamp: ts + 1)))
+        let stored = try rig.messages.all().last
+        let groupTable = GroupStateTable(queue: rig.db.queue)
+        let state = try groupTable.load(masterKey: masterKey)
+        try checkT(
+            "ReceiveTests.testSenderKeyMessageLandsInGroupThread",
+            afterSkdm.isEmpty
+                && stored?.kind == "text"
+                && stored?.body == "hi group"
+                && stored?.senderAci == peer.aci
+                && stored?.conversationId == "group:" + masterKey.map({ String(format: "%02x", $0) }).joined()
+                && state?.revision == 3
+                && (state?.members.contains(peer.aci) ?? false)
+                && acks.allExactlyOnce,
+            "stored=\(String(describing: stored)) state=\(String(describing: state))"
+        )
+    } catch {
+        check("ReceiveTests.testSenderKeyMessageLandsInGroupThread", false, "\(error)")
     }
 }
 
@@ -946,8 +1076,9 @@ private func testPniEnvelopePlaceholderNotRetried() async {
     }
 }
 
-// A sealed-sender SENDERKEY (group) message is permanent too: placeholder
-// attributed to the certificate's (trust-root validated) sender.
+// A sealed-sender SENDERKEY (group) message with no session may still
+// decrypt once its SKDM arrives, so it retries like any decrypt failure:
+// no row at first, an attributed placeholder only at the attempts cap.
 private func testSenderKeyEnvelopePlaceholder() async {
     do {
         let (rig, peer, _) = try bobAndPeer()
@@ -990,10 +1121,17 @@ private func testSenderKeyEnvelopePlaceholder() async {
         let receiver = try rig.receiver(trustRoots: [root.publicKey])
         let acks = AckCounter()
         await receiver.process(acks.envelope(try groupEnvelope(1_700_002_100_000)))
+        let afterFirst = try rig.unprocessed.all().first
+        let noRowYet = try placeholderRows(rig).isEmpty
+        await receiver.replayUnprocessed()
+        await receiver.replayUnprocessed()
+        let noRowStill = try placeholderRows(rig).isEmpty
+        await receiver.replayUnprocessed()
         let rows = try placeholderRows(rig)
         try checkT(
             "ReceiveTests.testSenderKeyEnvelopePlaceholder",
-            rows.count == 1 && rows[0].kind == "unsupported" && rows[0].senderAci == peer.aci
+            afterFirst?.attempts == 1 && noRowYet && noRowStill
+                && rows.count == 1 && rows[0].kind == "undecryptable" && rows[0].senderAci == peer.aci
                 && rows[0].senderDevice == peer.deviceId
                 && rows[0].conversationId == "aci:\(peer.aci)"
                 && (try rig.unprocessed.count()) == 0 && acks.total == 1,
@@ -1001,9 +1139,13 @@ private func testSenderKeyEnvelopePlaceholder() async {
         )
 
         // A receiver that does not trust the certificate's root must not
-        // attribute a placeholder to an unvalidated (spoofable) sender.
+        // attribute a placeholder to an unvalidated (spoofable) sender,
+        // even at the cap.
         let rogue = try rig.receiver(trustRoots: [IdentityKeyPair.generate().publicKey])
         await rogue.process(AckCounter().envelope(try groupEnvelope(1_700_002_101_000)))
+        await rogue.replayUnprocessed()
+        await rogue.replayUnprocessed()
+        await rogue.replayUnprocessed()
         try checkT(
             "ReceiveTests.testUnvalidatedSenderGetsNoPlaceholder",
             (try placeholderRows(rig)).count == 1 && (try rig.unprocessed.count()) == 0
