@@ -13,12 +13,21 @@ public struct ThreadMessage: Sendable, Equatable, Comparable {
     public let senderAci: String
     public let body: String
     public let timestamp: UInt64
+    /// True for rows we sent (outbox `status` set); false for inbound.
+    public let isOutgoing: Bool
 
-    public init(rowId: Int64, senderAci: String, body: String, timestamp: UInt64) {
+    public init(
+        rowId: Int64,
+        senderAci: String,
+        body: String,
+        timestamp: UInt64,
+        isOutgoing: Bool = false
+    ) {
         self.rowId = rowId
         self.senderAci = senderAci
         self.body = body
         self.timestamp = timestamp
+        self.isOutgoing = isOutgoing
     }
 
     public static func < (lhs: ThreadMessage, rhs: ThreadMessage) -> Bool {
@@ -38,7 +47,8 @@ public struct ThreadMessage: Sendable, Equatable, Comparable {
             senderAci: stored.senderAci,
             // Placeholder rows (unsupported/undecryptable) show fixed text.
             body: stored.displayBody,
-            timestamp: stored.timestamp
+            timestamp: stored.timestamp,
+            isOutgoing: stored.status != nil
         )
     }
 }

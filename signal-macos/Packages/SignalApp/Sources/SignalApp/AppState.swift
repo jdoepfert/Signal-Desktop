@@ -573,7 +573,7 @@ public final class AppState: ObservableObject {
     }
 
     private func deliverNotification(message: DecryptedMessage, conversation: StoredConversation) async {
-        guard let stack else {
+        guard stack != nil else {
             return
         }
         let title = conversationTitle(for: conversation)
@@ -609,7 +609,8 @@ public final class AppState: ObservableObject {
                         rowId: $0.rowId,
                         senderAci: $0.senderAci,
                         body: $0.displayBody,
-                        timestamp: $0.timestamp
+                        timestamp: $0.timestamp,
+                        isOutgoing: $0.status != nil
                     )
                 }
             )
