@@ -66,4 +66,29 @@ func runConversationViewModelTests() async {
         )
     }
 }
+
+func runBuildInfoTests() {
+    // Footer summary names the commit; missing keys degrade to "unknown".
+    let stamped = BuildInfo(infoDictionary: [
+        "CFBundleShortVersionString": "2026.10.09",
+        "SignalMacCommit": "2a4116a",
+        "SignalMacBuildDate": "2026-10-09T14:00:00Z",
+    ])
+    check(
+        "MessagingTests.testBuildInfoSummary",
+        stamped.summary == "2026.10.09 (2a4116a)"
+    )
+    let unstamped = BuildInfo(infoDictionary: [:])
+    check(
+        "MessagingTests.testBuildInfoUnknown",
+        unstamped.summary == "unknown"
+            && unstamped.detail.contains("unknown")
+    )
+    check(
+        "MessagingTests.testBuildInfoDetail",
+        stamped.detail.contains("2a4116a")
+            && stamped.detail.contains("2026-10-09T14:00:00Z")
+            && stamped.detail.contains("2026.10.09")
+    )
+}
 #endif

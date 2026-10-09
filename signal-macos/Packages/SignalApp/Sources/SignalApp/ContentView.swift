@@ -67,6 +67,8 @@ public struct ContentView: View {
                     .padding(4)
             }
             conversationsView
+            Divider()
+            BuildFooter()
         }
     }
 
@@ -118,10 +120,35 @@ public struct ContentView: View {
 
 /// Confirmed reset to a clean slate: deletes this Mac's local Signal data
 /// and returns to the QR link flow.
-/// Confirmation flag as an observable object rather than `@State`: the
+/// Confirmation flags as observable objects rather than `@State`: the
 /// SwiftUI `@State` macro plugin only ships with full Xcode, and this builds
 /// with the Command Line Tools too.
 final class StartOverConfirmation: ObservableObject {
+    @Published var isPresented = false
+}
+
+/// Build identity footer: which commit this bundle was built from, with
+/// the full stamp one tap away (for manual-test provenance).
+struct BuildFooter: View {
+    private let info = BuildInfo.live
+    @StateObject private var about = AboutConfirmation()
+
+    var body: some View {
+        Button(info.summary) {
+            about.isPresented = true
+        }
+        .font(.caption2)
+        .foregroundColor(.secondary)
+        .padding(4)
+        .alert("This build", isPresented: $about.isPresented) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(info.detail)
+        }
+    }
+}
+
+final class AboutConfirmation: ObservableObject {
     @Published var isPresented = false
 }
 

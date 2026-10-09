@@ -54,6 +54,8 @@ for fw in "$CONTENTS"/Frameworks/*.framework; do
 done
 
 VERSION=$(date -u +%Y.%m.%d)
+COMMIT=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cat > "$CONTENTS/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -69,6 +71,10 @@ cat > "$CONTENTS/Info.plist" << EOF
     <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
     <string>$VERSION</string>
+    <key>SignalMacCommit</key>
+    <string>$COMMIT</string>
+    <key>SignalMacBuildDate</key>
+    <string>$BUILD_DATE</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
