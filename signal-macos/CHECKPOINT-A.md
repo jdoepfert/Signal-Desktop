@@ -65,7 +65,9 @@ Notes on specific lines:
   "Can't reach Signal" text) or the link failed after the scan. Send the log.
 - **Line 10:** Signal needs a connection attempt to learn that the device was
   removed, so allow up to a minute. If the Mac was offline during the unlink,
-  it shows the message on the next launch.
+  it shows the message on the next launch. On launch the app first restores
+  the local database, so the old conversations may flash briefly before the
+  "unlinked" screen appears; that is expected, not a failure.
 - **Line 13 is optional** and needs a contact who reinstalled, or a second
   phone you can re-register for the test. It needs an existing conversation
   (line 4), because the Mac cannot start new ones yet.
@@ -75,7 +77,7 @@ Notes on specific lines:
 
 ## Result
 
-- Date / macOS version / app build:
-- Lines passed:
-- Lines failed (with the number of the fix round that addressed each):
-- Overall: PASS only if every non-skipped line passed.
+- Date / macOS version / app build: 2026-10-09 / macOS 26.6.2 (25G83) / SignalMac.app built from 85f2c83 (bubbles + timestamps)
+- Lines passed: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (9, 12 skipped; 13 optional, not run)
+- Lines failed (with the number of the fix round that addressed each): none outstanding; thread-layout papercuts (bubbles, timestamps) fixed in 85f2c83 and re-tested PASS
+- Overall: PASS
