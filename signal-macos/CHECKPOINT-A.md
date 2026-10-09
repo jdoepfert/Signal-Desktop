@@ -79,7 +79,7 @@ Notes on specific lines:
 
 ## Result
 
-- Date / macOS version / app build: 2026-10-09 / macOS 26.6.2 (25G83) / SignalMac.app built from 85f2c83 (bubbles + timestamps)
-- Lines passed: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (9, 12 skipped; 13 optional, not run)
-- Lines failed (with the number of the fix round that addressed each): none outstanding; thread-layout papercuts (bubbles, timestamps) fixed in 85f2c83 and re-tested PASS
-- Overall: PASS
+- Date / macOS version / app build: 2026-10-09 / macOS 26.6.2 (25G83) / SignalMac.app built from 1394521f3 (names + Note to Self + build footer), no relink
+- Lines passed: 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (9, 12 skipped; 13 optional, not run) + names assertion (contact names resolve, Note-to-Self titled) verified live on this build
+- Lines failed (with the number of the fix round that addressed each): none outstanding; thread-layout papercuts fixed in 85f2c83, profile fetch/cache ordering fixed in d8d2c5c, Note-to-Self title/key in 1394521f3 — all re-tested PASS
+- Overall: PASS — Milestone A checkpoint done
