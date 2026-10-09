@@ -59,6 +59,9 @@ public enum MessageKind {
     /// A message we were acked for but could not decrypt (bad MAC, no
     /// session, malformed): a placeholder with an empty body.
     public static let undecryptable = "undecryptable"
+    public static let contactSync = "contact-sync"
+    /// Phone contact-sync batch (blob pointer in `attachment`); ingested by
+    /// the app, never shown in a thread.
 
     /// What the thread shows for a row with no text of its own (fixed
     /// English copy; Milestone A has no localization yet).
@@ -94,6 +97,9 @@ public enum MessageStatus {
 public enum ConversationTarget: Sendable, Equatable {
     case direct(aci: String)
     case group(masterKey: Data)
+    /// Phone bookkeeping (contact sync): a hidden conversation the UI
+    /// never opens.
+    case sync
 }
 
 /// A message ready to persist.
@@ -202,6 +208,13 @@ public final class MessageStore: Sendable, MessageWriting {
             conversationId = try transaction.conversationId(forAci: aci)
         case .group(let masterKey):
             conversationId = try transaction.conversationId(forGroup: masterKey)
+        case .sync:
+            conversationId = try ConversationStore.fetchOrCreate(
+                id: "sync",
+                kind: "sync",
+                name: nil,
+                in: transaction.db
+            ).id
         }
         let (rowId, inserted) = try Self.insert(
             message,

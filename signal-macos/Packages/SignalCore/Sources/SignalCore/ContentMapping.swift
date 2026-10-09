@@ -58,7 +58,10 @@ enum ContentMapping {
         case .dataMessage(let dataMessage)?:
             return inbound(dataMessage, context: context)
         case .syncMessage(let sync)?:
-            return sent(sync, context: context)
+            if let sentMessage = sent(sync, context: context) {
+                return sentMessage
+            }
+            return syncContacts(sync, context: context)
         case .editMessage(let edit)?:
             // An edit is not a new message in Milestone A; show the
             // placeholder rather than silently dropping text.
@@ -155,6 +158,47 @@ enum ContentMapping {
             // Sent from another of our devices: already delivered.
             status: "sent",
             attachment: built.attachment
+        )
+    }
+
+    // MARK: - Contact sync (phone bookkeeping, not a chat message)
+
+    /// Sync `contacts` carries a blob pointer (Desktop
+    /// `MessageReceiver.#handleContacts`). Only trustworthy from one of OUR
+    /// devices; the pointer record persists with the row so the app can
+    /// download and ingest it after the transaction commits.
+    private static func syncContacts(
+        _ sync: SignalServiceProtos_SyncMessage,
+        context: InboundContext
+    ) -> NewMessage? {
+        guard context.senderAci == context.ourAci else {
+            logger.error("ignoring sync contacts from a non-self sender")
+            return nil
+        }
+        guard case .contacts(let contacts)? = sync.content, contacts.hasBlob else {
+            return nil
+        }
+        let blob = contacts.blob
+        guard !blob.key.isEmpty, !blob.digest.isEmpty, !blob.cdnKey.isEmpty else {
+            logger.error("ignoring sync contacts with an unusable blob pointer")
+            return nil
+        }
+        return NewMessage(
+            senderAci: context.ourAci,
+            senderDevice: context.senderDevice,
+            body: "",
+            sentTimestamp: context.clientTimestamp,
+            target: .sync,
+            envelopeHash: context.envelopeHash,
+            kind: MessageKind.contactSync,
+            attachment: NewAttachment(
+                digest: blob.digest,
+                cdnKey: blob.cdnKey,
+                cdnNumber: blob.cdnNumber,
+                size: UInt64(blob.size),
+                contentType: blob.contentType,
+                key: blob.key
+            )
         )
     }
 

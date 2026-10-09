@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
+import SignalCore
 import SignalMessaging
 import SignalStorage
 
@@ -247,5 +248,98 @@ func runProfileTests() async {
         )
     } catch {
         check("MessagingTests.testThrowingFetchNotCached", false, "\(error)")
+    }
+}
+
+private func varintBytes(_ value: Int) -> Data {
+    var remaining = value
+    var out = Data()
+    repeat {
+        var byte = UInt8(remaining & 0x7F)
+        remaining >>= 7
+        if remaining != 0 {
+            byte |= 0x80
+        }
+        out.append(byte)
+    } while remaining != 0
+    return out
+}
+
+private func syncDetails(
+    aci: String,
+    name: String?,
+    phone: String?,
+    avatarBytes: Data = Data()
+) throws -> Data {
+    var details = SignalServiceProtos_ContactDetails()
+    details.aci = aci
+    if let name {
+        details.name = name
+    }
+    if let phone {
+        details.number = phone
+    }
+    if !avatarBytes.isEmpty {
+        details.avatar.contentType = "image/jpeg"
+        details.avatar.length = UInt32(avatarBytes.count)
+    }
+    let encoded = try details.serializedData()
+    return varintBytes(encoded.count) + encoded + avatarBytes
+}
+
+func runContactSyncTests() async {
+    // Sync blob entries land in the contacts table (name + phone by ACI).
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let store = ContactStore(
+            contacts: ContactTable(queue: db.queue),
+            profiles: ProfileFetcher { _ in nil }
+        )
+        let blob = try syncDetails(
+            aci: contactBob.lowercased(),
+            name: "Bob Sync",
+            phone: "+14155550199"
+        ) + syncDetails(
+            aci: contactAlice,
+            name: "Alice Sync",
+            phone: "+14155550132",
+            avatarBytes: Data([0xFF, 0xD8, 0xFF])
+        )
+        try ContactSync.ingest(blob: blob, into: store)
+        let table = ContactTable(queue: db.queue)
+        let bob = try table.fetch(aci: contactBob.lowercased())
+        let alice = try table.fetch(aci: contactAlice)
+        check(
+            "MessagingTests.testContactSyncImport",
+            bob?.name == "Bob Sync"
+                && bob?.phone == "+14155550199"
+                && alice?.name == "Alice Sync"
+                && alice?.phone == "+14155550132"
+        )
+    } catch {
+        check("MessagingTests.testContactSyncImport", false, "\(error)")
+    }
+
+    // A corrupt entry is skipped; neighbors still import.
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let store = ContactStore(
+            contacts: ContactTable(queue: db.queue),
+            profiles: ProfileFetcher { _ in nil }
+        )
+        let good = try syncDetails(aci: contactBob.lowercased(), name: "Bob Sync", phone: nil)
+        let corrupt = varintBytes(12) + Data(repeating: 0xFF, count: 12)
+        let blob = good + corrupt + (try syncDetails(aci: contactAlice, name: "Alice Sync", phone: nil))
+        try ContactSync.ingest(blob: blob, into: store)
+        let table = ContactTable(queue: db.queue)
+        let count = try table.count()
+        let bob = try table.fetch(aci: contactBob.lowercased())
+        let alice = try table.fetch(aci: contactAlice)
+        check(
+            "MessagingTests.testContactSyncSkipsBadEntry",
+            count == 2 && bob?.name == "Bob Sync" && alice?.name == "Alice Sync"
+        )
+    } catch {
+        check("MessagingTests.testContactSyncSkipsBadEntry", false, "\(error)")
     }
 }

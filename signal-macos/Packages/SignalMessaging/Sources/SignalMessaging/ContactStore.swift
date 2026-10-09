@@ -74,6 +74,10 @@ public final class ContactStore: Sendable {
         }
     }
 
+    public func count() throws -> Int {
+        try contacts.count()
+    }
+
     public func displayName(for aci: String) async throws -> String {
         if let row = try contacts.fetch(aci: aci) {
             if let name = row.name, !name.isEmpty {

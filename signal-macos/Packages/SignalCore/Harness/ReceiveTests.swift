@@ -36,6 +36,7 @@ func runReceiveTests() async {
     await testRetryDedupesBySentTimestamp()
     await testUnsupportedPlaceholder()
     await testAttachmentMessageMapsToRow()
+    await testSyncContactsPersistAsSyncRow()
     await testSentSyncLandsInDestinationThread()
     await testSentSyncFromOtherSenderIgnored()
     await testPaddingFailureKeepsNothingAndDoesNotCrash()
@@ -284,6 +285,56 @@ private func testAttachmentMessageMapsToRow() async {
         )
     } catch {
         check("ReceiveTests.testAttachmentMessageMapsToRow", false, "\(error)")
+    }
+}
+
+private func testSyncContactsPersistAsSyncRow() async {
+    do {
+        let ownAci = "dddddddd-1111-4222-8333-444444444444"
+        let rig = try ReceiverRig(ourAci: ownAci, ourDevice: 3)
+        try rig.provisionOwnKeys()
+        // Sync traffic comes from one of OUR devices (the phone).
+        let primary = try TestPeer(aci: ownAci, deviceId: 1)
+        try primary.establish(with: rig.makeBundle(), recipient: rig.address)
+        let ts: UInt64 = 1_700_000_300_000
+        var blobPointer = SignalServiceProtos_AttachmentPointer()
+        blobPointer.cdnKey = "sync-blob"
+        blobPointer.key = Data(repeating: 0x03, count: 64)
+        blobPointer.digest = Data(repeating: 0x04, count: 32)
+        blobPointer.size = 10
+        blobPointer.contentType = "application/octet-stream"
+        var contactsSync = SignalServiceProtos_SyncMessage.Contacts()
+        contactsSync.blob = blobPointer
+        var sync = SignalServiceProtos_SyncMessage()
+        sync.contacts = contactsSync
+        var content = SignalServiceProtos_Content()
+        content.syncMessage = sync
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try prekeyEnvelope(
+                from: primary,
+                to: rig,
+                content: try content.serializedData(),
+                clientTimestamp: ts
+            )
+        ))
+        let stored = try rig.messages.all().last
+        let table = AttachmentTable(queue: rig.db.queue)
+        let record = try table.load(digest: Data(repeating: 0x04, count: 32))
+        let conversations = try rig.conversations.allConversations()
+        try checkT(
+            "ReceiveTests.testSyncContactsPersistAsSyncRow",
+            stored?.kind == "contact-sync"
+                && stored?.conversationId == "sync"
+                && stored?.attachmentDigest == Data(repeating: 0x04, count: 32)
+                && record?.key == Data(repeating: 0x03, count: 64)
+                && conversations.contains(where: { $0.id == "sync" && $0.kind == "sync" })
+                && acks.allExactlyOnce,
+            "stored=\(String(describing: stored))"
+        )
+    } catch {
+        check("ReceiveTests.testSyncContactsPersistAsSyncRow", false, "\(error)")
     }
 }
 

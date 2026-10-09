@@ -96,6 +96,7 @@ await runAsync("MessagingTests") {
     await runSessionSetupTests()
     await runUnknownSenderTests()
     await runContactTests()
+    await runContactSyncTests()
     await runProfileTests()
     await runGroupTests()
     await runAttachmentTests()

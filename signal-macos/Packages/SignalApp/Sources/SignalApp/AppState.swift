@@ -430,9 +430,51 @@ public final class AppState: ObservableObject {
             return
         }
         do {
-            conversations = try stack.conversations.allConversations()
+            // The "sync" conversation holds phone bookkeeping, never chats.
+            conversations = try stack.conversations.allConversations().filter { $0.id != "sync" }
         } catch {
             self.error = String(describing: error)
+        }
+    }
+
+    /// Ingests pending phone contact-sync batches: downloads each sync
+    /// blob by digest and merges its entries. Idempotent (upserts merge),
+    /// so crash recovery just re-runs it; failures stay silent and retry
+    /// on the next batch.
+    private func ingestContactSync() async {
+        guard let stack else {
+            return
+        }
+        do {
+            let rows = try stack.messages.page(in: "sync", limit: 100)
+            var imported = false
+            for row in rows {
+                guard
+                    let digest = row.attachmentDigest,
+                    let record = try stack.attachmentTable.load(digest: digest)
+                else {
+                    continue
+                }
+                let pointer = AttachmentPointer(
+                    cdnKey: record.cdnKey,
+                    cdnNumber: record.cdnNumber,
+                    digest: record.digest,
+                    size: record.size,
+                    contentType: record.contentType,
+                    key: record.key
+                )
+                guard let blob = try? await stack.attachments.download(pointer) else {
+                    continue
+                }
+                try ContactSync.ingest(blob: blob, into: stack.contacts)
+                imported = true
+            }
+            if imported {
+                refreshConversations()
+                objectWillChange.send()
+            }
+        } catch {
+            Self.logger.error("contact sync ingest failed (\(ErrorReason.describe(error)))")
         }
     }
 
@@ -658,6 +700,16 @@ public final class AppState: ObservableObject {
         // resolve now (resolution never runs pre-connect, where it could
         // only fail and — before transport errors threw — poison the cache).
         await self.resolveMissingNames()
+        // Crash recovery for sync batches, then a first-time sync request:
+        // an empty contacts table means the phone never sent its book.
+        await self.ingestContactSync()
+        if let stack, (try? stack.contacts.count()) == 0 {
+            do {
+                try await sender.requestContactSync()
+            } catch {
+                Self.logger.error("contact sync request failed (\(ErrorReason.describe(error)))")
+            }
+        }
     }
 
     private func handleDeviceUnlinked() {
@@ -678,6 +730,12 @@ public final class AppState: ObservableObject {
                 // The receiver already committed the row, the conversation
                 // link, recency and unread count in the decrypt transaction.
                 refreshConversations()
+                if message.kind == MessageKind.contactSync {
+                    // Bookkeeping, not chat: ingest in the background.
+                    Task {
+                        await self.ingestContactSync()
+                    }
+                }
                 if !message.isOutgoing {
                     // Background: message display, read marks and
                     // notifications must not wait on profile network I/O.

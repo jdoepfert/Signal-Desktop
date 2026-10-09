@@ -253,6 +253,20 @@ public actor OutgoingSender {
         return timestamp
     }
 
+    /// Asks our other devices (the phone) to send their contacts (Desktop
+    /// `MessageSender.getRequestContactSyncMessage`). Sealed to our own
+    /// account like any other send; the reply arrives as sync `contacts`.
+    public func requestContactSync() async throws {
+        var request = SignalServiceProtos_SyncMessage.Request()
+        request.type = .contacts
+        var sync = SignalServiceProtos_SyncMessage()
+        sync.request = request
+        var content = SignalServiceProtos_Content()
+        content.syncMessage = sync
+        let padded = Padding.pad(try content.serializedData())
+        try await deliver(padded, to: ourAci, timestamp: nowMs(), sealed: true, urgent: false)
+    }
+
     /// The user accepted a contact's changed identity ("Safety number
     /// changed ... Send anyway?"). Archives every session with them, fetches
     /// their CURRENT bundles, saves the identity key those bundles present as
