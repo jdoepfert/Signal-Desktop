@@ -9,6 +9,7 @@ import SwiftUI
 public final class ComposerState: ObservableObject {
     @Published public var text = ""
     public var onSend: (String) -> Void = { _ in }
+    public var onAttach: () -> Void = {}
 
     public init() {}
 
@@ -19,6 +20,10 @@ public final class ComposerState: ObservableObject {
         }
         text = ""
         onSend(trimmed)
+    }
+
+    public func attach() {
+        onAttach()
     }
 }
 
@@ -35,6 +40,9 @@ public struct ComposerView: View {
         HStack {
             TextField("Message", text: $state.text)
                 .textFieldStyle(.roundedBorder)
+            Button("Attach") {
+                state.attach()
+            }
             Button("Send") {
                 state.send()
             }

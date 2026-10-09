@@ -35,6 +35,7 @@ func runReceiveTests() async {
     await testCrashBeforePersistReplays()
     await testRetryDedupesBySentTimestamp()
     await testUnsupportedPlaceholder()
+    await testAttachmentMessageMapsToRow()
     await testSentSyncLandsInDestinationThread()
     await testSentSyncFromOtherSenderIgnored()
     await testPaddingFailureKeepsNothingAndDoesNotCrash()
@@ -239,6 +240,50 @@ private func testUnsupportedPlaceholder() async {
         )
     } catch {
         check("ReceiveTests.testUnsupportedPlaceholder", false, "\(error)")
+    }
+}
+
+private func testAttachmentMessageMapsToRow() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let ts: UInt64 = 1_700_000_200_000
+        var pointer = SignalServiceProtos_AttachmentPointer()
+        pointer.cdnKey = "cdn-key"
+        pointer.key = Data(repeating: 0x01, count: 64)
+        pointer.digest = Data(repeating: 0x02, count: 32)
+        pointer.size = 100
+        pointer.contentType = "image/jpeg"
+        var attachment = SignalServiceProtos_DataMessage()
+        attachment.body = "look"
+        attachment.timestamp = ts
+        attachment.attachments = [pointer]
+        var withAttachment = SignalServiceProtos_Content()
+        withAttachment.dataMessage = attachment
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try withAttachment.serializedData(),
+                clientTimestamp: ts
+            )
+        ))
+        let stored = try rig.messages.all().last
+        let table = AttachmentTable(queue: rig.db.queue)
+        let record = try table.load(digest: Data(repeating: 0x02, count: 32))
+        try checkT(
+            "ReceiveTests.testAttachmentMessageMapsToRow",
+            stored?.kind == "text"
+                && stored?.body == "look"
+                && stored?.attachmentDigest == Data(repeating: 0x02, count: 32)
+                && record?.key == Data(repeating: 0x01, count: 64)
+                && record?.cdnKey == "cdn-key"
+                && acks.allExactlyOnce,
+            "stored=\(String(describing: stored))"
+        )
+    } catch {
+        check("ReceiveTests.testAttachmentMessageMapsToRow", false, "\(error)")
     }
 }
 

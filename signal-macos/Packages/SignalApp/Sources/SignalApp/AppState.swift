@@ -1,6 +1,7 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import AppKit
 import Combine
 import Foundation
 import LibSignalClient
@@ -21,6 +22,8 @@ private struct LiveStack {
     let conversations: ConversationStore
     let contacts: ContactStore
     let messages: MessageStore
+    let attachments: AttachmentService
+    let attachmentTable: AttachmentTable
 }
 
 /// Where the app is in its account lifecycle.
@@ -76,6 +79,12 @@ public final class AppState: ObservableObject {
 
     public let thread = ConversationViewModel()
     public let composer = ComposerState()
+    /// Downloaded attachment bytes by digest (in-memory; the table is the
+    /// durable cache). The thread view reads through this.
+    public private(set) var attachmentBytes: [Data: Data] = [:]
+    /// Threads auto-fetch attachments up to this size on open; larger ones
+    /// show as file rows without bytes.
+    public static let autoDownloadMaxBytes: UInt64 = 25 * 1024 * 1024
 
     private let environment: AppEnvironment
     private let lifecycle: AccountLifecycle
@@ -113,6 +122,11 @@ public final class AppState: ObservableObject {
         composer.onSend = { [weak self] text in
             Task {
                 await self?.send(text: text)
+            }
+        }
+        composer.onAttach = { [weak self] in
+            Task {
+                await self?.attachFile()
             }
         }
     }
@@ -292,6 +306,62 @@ public final class AppState: ObservableObject {
             self.error = String(describing: error)
         }
         // Success or failure, the row (sent or failed) is in the store.
+        refreshConversations()
+        await reloadThread()
+    }
+
+    /// Attach button: picks one file, uploads it, and sends it with the
+    /// composer's current text as the caption. Upload-first (like Desktop):
+    /// a failed upload sends nothing and shows the error instead.
+    public func attachFile() async {
+        guard
+            let stack,
+            let selection,
+            selection.hasPrefix("aci:")
+        else {
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+        let contentType =
+            (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?
+                .preferredMIMEType) ?? "application/octet-stream"
+        do {
+            let data = try Data(contentsOf: url)
+            guard UInt64(data.count) <= AttachmentService.maxBytes else {
+                self.error = "File is larger than 100 MB."
+                return
+            }
+            let caption = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let pointer = try await stack.attachments.upload(data, contentType: contentType)
+            composer.text = ""
+            _ = try await stack.sender.sendAttachment(
+                NewAttachment(
+                    digest: pointer.digest,
+                    cdnKey: pointer.cdnKey,
+                    cdnNumber: pointer.cdnNumber,
+                    size: pointer.size,
+                    contentType: pointer.contentType,
+                    key: pointer.key
+                ),
+                caption: caption,
+                to: String(selection.dropFirst(4))
+            )
+        } catch SendError.identityChanged(let changedAci) {
+            let failed = try? stack.messages.page(in: selection, limit: 1).first
+            if let failed, failed.status == MessageStatus.failed {
+                identityPrompt = IdentityChangePrompt(aci: changedAci, timestamp: failed.timestamp)
+            } else {
+                self.error = String(describing: SendError.identityChanged(changedAci))
+            }
+        } catch {
+            self.error = String(describing: error)
+        }
         refreshConversations()
         await reloadThread()
     }
@@ -492,6 +562,12 @@ public final class AppState: ObservableObject {
         )
         let conversations = ConversationStore(queue: database.queue)
         let contactTable = ContactTable(queue: database.queue)
+        let attachmentTable = AttachmentTable(queue: database.queue)
+        let cdn = LiveCDNClient(
+            environment: environment,
+            formSend: { [chat] request in try await chat.send(request) }
+        )
+        let attachmentService = AttachmentService(cdn: cdn, attachments: attachmentTable)
         let sender = OutgoingSender(
             store: protocolStore,
             identity: identityStore,
@@ -524,7 +600,9 @@ public final class AppState: ObservableObject {
             unauth: unauth,
             conversations: conversations,
             contacts: contacts,
-            messages: messages
+            messages: messages,
+            attachments: attachmentService,
+            attachmentTable: attachmentTable
         )
         linkedAci = creds.aci
         phase = .linked
@@ -661,24 +739,73 @@ public final class AppState: ObservableObject {
             // Thread-scoped: only messages linked to this conversation.
             // Group scoping by conversation id arrives with group sync.
             let stored = try stack.messages.page(in: selection, limit: 500)
+            let digests = stored.compactMap(\.attachmentDigest)
+            let records = try stack.attachmentTable.loadMany(digests: digests)
+            let byDigest = Dictionary(uniqueKeysWithValues: records.map { ($0.digest, $0) })
             // `thread` is a nested ObservableObject the views do not observe
             // directly: tell the views this object changed.
             objectWillChange.send()
             thread.replaceAll(
-                with: stored.map {
-                    ThreadMessage(
-                        rowId: $0.rowId,
-                        senderAci: $0.senderAci,
-                        body: $0.displayBody,
-                        timestamp: $0.timestamp,
-                        isOutgoing: $0.status != nil
+                with: stored.map { row in
+                    let attachment = row.attachmentDigest.flatMap { digest in
+                        byDigest[digest].map {
+                            ThreadAttachment(
+                                digest: digest,
+                                contentType: $0.contentType,
+                                size: $0.size
+                            )
+                        }
+                    }
+                    return ThreadMessage(
+                        rowId: row.rowId,
+                        senderAci: row.senderAci,
+                        body: row.displayBody,
+                        timestamp: row.timestamp,
+                        isOutgoing: row.status != nil,
+                        attachment: attachment
                     )
                 }
             )
+            await downloadMissingAttachments(records: records)
             try stack.conversations.markRead(selection)
             refreshConversations()
         } catch {
             self.error = String(describing: error)
+        }
+    }
+
+    /// Fetches attachment bytes for the open thread (bounded: oversized
+    /// files stay as rows without bytes). Cached by digest in memory; the
+    /// table is the durable cache. Failures stay silent — the row still
+    /// renders as a file.
+    private func downloadMissingAttachments(records: [StoredAttachment]) async {
+        guard let stack else {
+            return
+        }
+        var fetched = false
+        for record in records {
+            guard
+                attachmentBytes[record.digest] == nil,
+                record.size <= Self.autoDownloadMaxBytes
+            else {
+                continue
+            }
+            let pointer = AttachmentPointer(
+                cdnKey: record.cdnKey,
+                cdnNumber: record.cdnNumber,
+                digest: record.digest,
+                size: record.size,
+                contentType: record.contentType,
+                key: record.key
+            )
+            guard let bytes = try? await stack.attachments.download(pointer) else {
+                continue
+            }
+            attachmentBytes[record.digest] = bytes
+            fetched = true
+        }
+        if fetched {
+            objectWillChange.send()
         }
     }
 

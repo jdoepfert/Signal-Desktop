@@ -8,6 +8,12 @@ import SignalStorage
 /// One thread row. Ordered by (timestamp, rowId): row ids are monotonic in
 /// insertion order, so rowId is the arrival-order proxy (no separate
 /// received-at column needed).
+public struct ThreadAttachment: Sendable, Equatable {
+    public let digest: Data
+    public let contentType: String
+    public let size: UInt64
+}
+
 public struct ThreadMessage: Sendable, Equatable, Comparable {
     public let rowId: Int64
     public let senderAci: String
@@ -15,19 +21,23 @@ public struct ThreadMessage: Sendable, Equatable, Comparable {
     public let timestamp: UInt64
     /// True for rows we sent (outbox `status` set); false for inbound.
     public let isOutgoing: Bool
+    /// Set when the message carries a file (bytes resolve separately).
+    public let attachment: ThreadAttachment?
 
     public init(
         rowId: Int64,
         senderAci: String,
         body: String,
         timestamp: UInt64,
-        isOutgoing: Bool = false
+        isOutgoing: Bool = false,
+        attachment: ThreadAttachment? = nil
     ) {
         self.rowId = rowId
         self.senderAci = senderAci
         self.body = body
         self.timestamp = timestamp
         self.isOutgoing = isOutgoing
+        self.attachment = attachment
     }
 
     public static func < (lhs: ThreadMessage, rhs: ThreadMessage) -> Bool {

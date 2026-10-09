@@ -18,16 +18,25 @@ import SignalStorage
 
 public struct AttachmentPointer: Sendable, Equatable {
     public let cdnKey: String
+    public let cdnNumber: UInt32
     public let digest: Data
     public let size: UInt64
     public let contentType: String
     /// 64-byte media keys (AES-256 + HMAC-SHA256 halves), as carried in the
-    /// message pointer. Present for rows we uploaded; incoming rows resolve
-    /// it from the attachments table (Task 2 wires the message layer).
+    /// message pointer. Incoming rows resolve the key from the attachments
+    /// table by digest.
     public let key: Data
 
-    public init(cdnKey: String, digest: Data, size: UInt64, contentType: String, key: Data) {
+    public init(
+        cdnKey: String,
+        cdnNumber: UInt32 = 0,
+        digest: Data,
+        size: UInt64,
+        contentType: String,
+        key: Data
+    ) {
         self.cdnKey = cdnKey
+        self.cdnNumber = cdnNumber
         self.digest = digest
         self.size = size
         self.contentType = contentType
@@ -40,6 +49,7 @@ public enum AttachmentError: Error, Equatable {
     case digestMismatch
     case unknownKey
     case invalidKey
+    case transferFailed(status: Int)
 }
 
 /// Signal attachment crypto (Desktop `ts/Crypto.node.ts:503-606`,
@@ -127,7 +137,7 @@ public enum AttachmentCrypto {
 public protocol CDNClient: Sendable {
     func uploadForm(byteCount: UInt64) async throws -> UploadForm
     func put(_ bytes: Data, form: UploadForm) async throws -> String
-    func get(cdnKey: String) async throws -> Data
+    func get(cdnKey: String, cdnNumber: UInt32) async throws -> Data
 }
 
 /// Attachment upload/download in Signal format (see `AttachmentCrypto`).
@@ -161,12 +171,14 @@ public final class AttachmentService: Sendable {
         try attachments.save(
             digest: digest,
             cdnKey: cdnKey,
+            cdnNumber: form.cdn,
             size: UInt64(bytes.count),
             contentType: contentType,
             key: keys
         )
         return AttachmentPointer(
             cdnKey: cdnKey,
+            cdnNumber: form.cdn,
             digest: digest,
             size: UInt64(bytes.count),
             contentType: contentType,
@@ -178,7 +190,7 @@ public final class AttachmentService: Sendable {
         guard let record = try attachments.load(digest: pointer.digest) else {
             throw AttachmentError.unknownKey
         }
-        let blob = try await cdn.get(cdnKey: pointer.cdnKey)
+        let blob = try await cdn.get(cdnKey: record.cdnKey, cdnNumber: record.cdnNumber)
         let url = FileManager.default.temporaryDirectory
             .appending(path: "signal-attachment-\(UUID().uuidString).bin")
         do {

@@ -8,7 +8,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 6
+    public static let currentVersion = 7
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -204,6 +204,16 @@ public enum MigrationChain {
             }
             try db.alter(table: "contacts") { t in
                 t.add(column: "profile_key", .blob)
+            }
+        }
+        migrator.registerMigration("v7-attachments") { db in
+            // Message rows link their attachment by digest; the CDN number
+            // rides along for downloads.
+            try db.alter(table: "messages") { t in
+                t.add(column: "attachment_digest", .blob)
+            }
+            try db.alter(table: "attachments") { t in
+                t.add(column: "cdn_number", .integer).notNull().defaults(to: 0)
             }
         }
         return migrator

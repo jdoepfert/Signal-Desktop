@@ -95,7 +95,8 @@ enum ContentMapping {
             target: built.target ?? .direct(aci: context.senderAci),
             envelopeHash: context.envelopeHash,
             expireTimer: built.expireTimer,
-            kind: built.unsupported ? MessageKind.unsupported : MessageKind.text
+            kind: built.unsupported ? MessageKind.unsupported : MessageKind.text,
+            attachment: built.attachment
         )
     }
 
@@ -152,7 +153,8 @@ enum ContentMapping {
             expiresAt: expiresAt,
             kind: built.unsupported ? MessageKind.unsupported : MessageKind.sentSync,
             // Sent from another of our devices: already delivered.
-            status: "sent"
+            status: "sent",
+            attachment: built.attachment
         )
     }
 
@@ -165,6 +167,8 @@ enum ContentMapping {
         var expireTimer: UInt32?
         /// Non-nil only for group messages.
         var target: ConversationTarget?
+        /// The first usable attachment pointer, if any.
+        var attachment: NewAttachment?
     }
 
     /// Flags (end session, timer update, profile key update) carry no
@@ -179,14 +183,15 @@ enum ContentMapping {
         if dataMessage.hasFlags, dataMessage.flags & controlFlags != 0 {
             return nil
         }
-        let unsupported = !dataMessage.attachments.isEmpty
+        let attachment = Self.attachment(from: dataMessage)
+        let unsupported = (attachment == nil && !dataMessage.attachments.isEmpty)
             || dataMessage.hasGroupV2
             || dataMessage.hasReaction
             || dataMessage.hasQuote
             || dataMessage.hasSticker
             || dataMessage.hasPollCreate
         let body = dataMessage.hasBody ? dataMessage.body : ""
-        guard !body.isEmpty || unsupported else {
+        guard !body.isEmpty || unsupported || attachment != nil else {
             return nil
         }
         var target: ConversationTarget?
@@ -201,7 +206,31 @@ enum ContentMapping {
             unsupported: unsupported,
             expireTimer: dataMessage.hasExpireTimer && dataMessage.expireTimer > 0
                 ? dataMessage.expireTimer : nil,
-            target: target
+            target: target,
+            attachment: attachment
+        )
+    }
+
+    /// First attachment pointer with usable key material. Empty pointers
+    /// (like the harness placeholder probe) yield nil and keep the
+    /// unsupported path. Legacy numeric cdnIds are out of scope: without a
+    /// key string there is nothing downloadable.
+    private static func attachment(
+        from dataMessage: SignalServiceProtos_DataMessage
+    ) -> NewAttachment? {
+        guard let pointer = dataMessage.attachments.first else {
+            return nil
+        }
+        guard !pointer.key.isEmpty, !pointer.digest.isEmpty, !pointer.cdnKey.isEmpty else {
+            return nil
+        }
+        return NewAttachment(
+            digest: pointer.digest,
+            cdnKey: pointer.cdnKey,
+            cdnNumber: pointer.cdnNumber,
+            size: UInt64(pointer.size),
+            contentType: pointer.contentType,
+            key: pointer.key
         )
     }
 

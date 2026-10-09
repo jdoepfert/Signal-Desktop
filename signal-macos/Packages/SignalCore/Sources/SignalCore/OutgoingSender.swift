@@ -219,6 +219,40 @@ public actor OutgoingSender {
         return timestamp
     }
 
+    /// Sends an already-uploaded attachment with an optional caption, same
+    /// outbox lifecycle as `sendText`.
+    public func sendAttachment(
+        _ attachment: NewAttachment,
+        caption: String,
+        to aci: String
+    ) async throws -> UInt64 {
+        let aci = aci.lowercased()
+        let conversationId = "aci:\(aci)"
+        let (timer, version) = try conversations.expireTimer(conversationId)
+        let (rowId, timestamp) = try insertPending(
+            body: caption,
+            aci: aci,
+            timer: timer,
+            attachment: attachment
+        )
+        do {
+            try await transmitAttachment(
+                attachment,
+                caption: caption,
+                to: aci,
+                timestamp: timestamp,
+                timer: timer,
+                version: version
+            )
+        } catch {
+            Self.logger.error("attachment send failed: \(Self.reason(error))")
+            markStatus(rowId, MessageStatus.failed)
+            throw error
+        }
+        markStatus(rowId, MessageStatus.sent)
+        return timestamp
+    }
+
     /// The user accepted a contact's changed identity ("Safety number
     /// changed ... Send anyway?"). Archives every session with them, fetches
     /// their CURRENT bundles, saves the identity key those bundles present as
@@ -372,13 +406,75 @@ public actor OutgoingSender {
         }
     }
 
+    private func transmitAttachment(
+        _ attachment: NewAttachment,
+        caption: String,
+        to aci: String,
+        timestamp: UInt64,
+        timer: UInt32?,
+        version: UInt32?
+    ) async throws {
+        var pointer = SignalServiceProtos_AttachmentPointer()
+        pointer.cdnKey = attachment.cdnKey
+        pointer.cdnNumber = attachment.cdnNumber
+        pointer.key = attachment.key
+        pointer.digest = attachment.digest
+        pointer.size = UInt32(clamping: attachment.size)
+        pointer.contentType = attachment.contentType
+        var dataMessage = SignalServiceProtos_DataMessage()
+        dataMessage.body = caption
+        dataMessage.attachments = [pointer]
+        dataMessage.timestamp = timestamp
+        do {
+            dataMessage.profileKey = try identity.profileKey()
+        } catch {
+            // The message still goes out, just without our profile key.
+            Self.logger.info("own profile key unavailable: \(Self.reason(error))")
+        }
+        if let timer, timer > 0 {
+            dataMessage.expireTimer = timer
+            if let version {
+                dataMessage.expireTimerVersion = version
+            }
+        }
+        let isNoteToSelf = aci == ourAci
+        if !isNoteToSelf {
+            var content = SignalServiceProtos_Content()
+            content.dataMessage = dataMessage
+            try await send(content, to: aci, timestamp: timestamp)
+        }
+
+        // Same sent-sync transcript as text (for Note to Self it IS the message).
+        var sent = SignalServiceProtos_SyncMessage.Sent()
+        sent.destinationServiceID = aci
+        sent.timestamp = timestamp
+        sent.message = dataMessage
+        if let timer, timer > 0 {
+            sent.expirationStartTimestamp = timestamp
+        }
+        var sync = SignalServiceProtos_SyncMessage()
+        sync.sent = sent
+        var syncContent = SignalServiceProtos_Content()
+        syncContent.syncMessage = sync
+        do {
+            let padded = Padding.pad(try syncContent.serializedData())
+            try await deliver(padded, to: ourAci, timestamp: timestamp, sealed: false, urgent: false)
+        } catch {
+            if isNoteToSelf {
+                throw error
+            }
+            Self.logger.error("sent-sync transcript failed: \(Self.reason(error))")
+        }
+    }
+
     /// Writes the outgoing row (`pending`) with a timestamp unique among our
     /// own messages (two sends in one millisecond must not collide on
     /// UNIQUE(sender_aci, sent_timestamp)).
     private func insertPending(
         body: String,
         aci: String,
-        timer: UInt32?
+        timer: UInt32?,
+        attachment: NewAttachment? = nil
     ) throws -> (rowId: Int64, timestamp: UInt64) {
         while true {
             lastTimestamp = max(nowMs(), lastTimestamp + 1)
@@ -393,7 +489,8 @@ public actor OutgoingSender {
                         target: .direct(aci: aci),
                         expireTimer: timer,
                         kind: MessageKind.text,
-                        status: MessageStatus.pending
+                        status: MessageStatus.pending,
+                        attachment: attachment
                     ),
                     in: transaction
                 )

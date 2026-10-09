@@ -20,6 +20,8 @@ public struct StoredMessage: Sendable, Equatable {
     public let kind: String
     /// NULL for inbound; `pending`, `sent` or `failed` for outbound.
     public let status: String?
+    /// Digest into `attachments` when the message carries a file.
+    public let attachmentDigest: Data?
 
     public init(
         rowId: Int64,
@@ -32,7 +34,8 @@ public struct StoredMessage: Sendable, Equatable {
         expireTimer: UInt32? = nil,
         expiresAt: UInt64? = nil,
         kind: String = MessageKind.text,
-        status: String? = nil
+        status: String? = nil,
+        attachmentDigest: Data? = nil
     ) {
         self.rowId = rowId
         self.senderAci = senderAci
@@ -45,6 +48,7 @@ public struct StoredMessage: Sendable, Equatable {
         self.expiresAt = expiresAt
         self.kind = kind
         self.status = status
+        self.attachmentDigest = attachmentDigest
     }
 }
 
@@ -105,6 +109,8 @@ public struct NewMessage: Sendable, Equatable {
     public var kind: String
     /// NULL (inbound) or `pending`/`sent`/`failed` (outbound).
     public var status: String?
+    /// Set when the message carries a file (persisted alongside the row).
+    public var attachment: NewAttachment?
 
     public init(
         senderAci: String,
@@ -116,7 +122,8 @@ public struct NewMessage: Sendable, Equatable {
         expireTimer: UInt32? = nil,
         expiresAt: UInt64? = nil,
         kind: String = MessageKind.text,
-        status: String? = nil
+        status: String? = nil,
+        attachment: NewAttachment? = nil
     ) {
         self.senderAci = senderAci
         self.senderDevice = senderDevice
@@ -128,6 +135,33 @@ public struct NewMessage: Sendable, Equatable {
         self.expiresAt = expiresAt
         self.kind = kind
         self.status = status
+        self.attachment = attachment
+    }
+}
+
+/// Pointer bytes for one attachment, as carried in the message.
+public struct NewAttachment: Sendable, Equatable {
+    public var digest: Data
+    public var cdnKey: String
+    public var cdnNumber: UInt32
+    public var size: UInt64
+    public var contentType: String
+    public var key: Data
+
+    public init(
+        digest: Data,
+        cdnKey: String,
+        cdnNumber: UInt32,
+        size: UInt64,
+        contentType: String,
+        key: Data
+    ) {
+        self.digest = digest
+        self.cdnKey = cdnKey
+        self.cdnNumber = cdnNumber
+        self.size = size
+        self.contentType = contentType
+        self.key = key
     }
 }
 
@@ -193,8 +227,8 @@ public final class MessageStore: Sendable, MessageWriting {
             sql: """
                 INSERT INTO messages
                     (sender_aci, sender_device, body, sent_timestamp, conversation_id,
-                     envelope_hash, expire_timer, expires_at, kind, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     envelope_hash, expire_timer, expires_at, kind, status, attachment_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sender_aci, sent_timestamp) DO NOTHING
                 """,
             arguments: [
@@ -208,8 +242,32 @@ public final class MessageStore: Sendable, MessageWriting {
                 message.expiresAt.map { Int64(bitPattern: $0) },
                 message.kind,
                 message.status,
+                message.attachment?.digest,
             ]
         )
+        if let attachment = message.attachment {
+            try db.execute(
+                sql: """
+                    INSERT INTO attachments
+                        (digest, cdn_key, cdn_number, size, content_type, key_bytes)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(digest) DO UPDATE SET
+                        cdn_key = excluded.cdn_key,
+                        cdn_number = excluded.cdn_number,
+                        size = excluded.size,
+                        content_type = excluded.content_type,
+                        key_bytes = excluded.key_bytes
+                    """,
+                arguments: [
+                    attachment.digest,
+                    attachment.cdnKey,
+                    Int64(attachment.cdnNumber),
+                    Int64(bitPattern: attachment.size),
+                    attachment.contentType,
+                    attachment.key,
+                ]
+            )
+        }
         let inserted = db.changesCount == 1
         guard
             let rowId: Int64 = try Int64.fetchOne(
@@ -299,7 +357,7 @@ public final class MessageStore: Sendable, MessageWriting {
 
     private static let columns = """
         id, sender_aci, sender_device, body, sent_timestamp, conversation_id,
-        envelope_hash, expire_timer, expires_at, kind, status
+        envelope_hash, expire_timer, expires_at, kind, status, attachment_digest
         """
 
     public func all() throws -> [StoredMessage] {
@@ -380,5 +438,6 @@ extension StoredMessage: FetchableRecord {
         expiresAt = expires.map { UInt64(bitPattern: $0) }
         kind = row["kind"] ?? MessageKind.text
         status = row["status"]
+        attachmentDigest = row["attachment_digest"]
     }
 }

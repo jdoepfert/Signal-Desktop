@@ -29,7 +29,7 @@ final class FakeCDN: CDNClient, @unchecked Sendable {
         return form.key
     }
 
-    func get(cdnKey: String) async throws -> Data {
+    func get(cdnKey: String, cdnNumber: UInt32) async throws -> Data {
         guard var blob = lock.withLock({ blobs[cdnKey] }) else {
             throw AttachmentError.unknownKey
         }
@@ -231,5 +231,66 @@ func runAttachmentCryptoTests() async {
         )
     } catch {
         check("MessagingTests.testAttachmentUploadPointerCarriesKey", false, "\(error)")
+    }
+}
+
+private func uploadFormJSON() throws -> Data {
+    try JSONSerialization.data(withJSONObject: [
+        "cdn": 0,
+        "key": "form-key",
+        "headers": ["Content-Type": "application/octet-stream"],
+        "signed_upload_url": "https://example.invalid/signed-put",
+    ])
+}
+
+func runLiveCDNTests() async {
+    // Live CDN: form issuance path, signed POST upload, keyed GET download.
+    do {
+        final class FormRecorder: @unchecked Sendable {
+            var paths = [String]()
+        }
+        let formPaths = FormRecorder()
+        final class HttpRecorder: @unchecked Sendable {
+            var requests = [URLRequest]()
+            var putBody: Data?
+        }
+        let recorder = HttpRecorder()
+        let formSend: LiveTransport.AuthenticatedSend = { request in
+            formPaths.paths.append(request.pathAndQuery)
+            return (200, try uploadFormJSON())
+        }
+        let http: LiveCDNClient.HttpSend = { request in
+            recorder.requests.append(request)
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+            if request.httpMethod == "POST" {
+                recorder.putBody = request.httpBody
+                return (Data(), response)
+            }
+            return (recorder.putBody ?? Data(), response)
+        }
+        let client = LiveCDNClient(
+            environment: .staging, formSend: formSend, http: http
+        )
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let service = AttachmentService(cdn: client, attachments: AttachmentTable(queue: db.queue))
+        let pointer = try await service.upload(Data("live-blob".utf8), contentType: "text/plain")
+        let roundTripped = try await service.download(pointer)
+        let posts = recorder.requests.filter { $0.httpMethod == "POST" }
+        let gets = recorder.requests.filter { $0.httpMethod == "GET" }
+        check(
+            "MessagingTests.testAttachmentTransportRoundTrip",
+            formPaths.paths == ["/v4/attachments/form/upload?uploadLength=592"]
+                && roundTripped == Data("live-blob".utf8)
+                && posts.count == 1
+                && posts.first?.url?.absoluteString == "https://example.invalid/signed-put"
+                && posts.first?.value(forHTTPHeaderField: "Content-Type") == "application/octet-stream"
+                && gets.count == 1
+                && gets.first?.url?.absoluteString == "https://cdn-staging.signal.org/attachments/\(pointer.cdnKey)",
+            "formPaths=\(formPaths.paths) posts=\(posts.count) gets=\(gets.count)"
+        )
+    } catch {
+        check("MessagingTests.testAttachmentTransportRoundTrip", false, "\(error)")
     }
 }

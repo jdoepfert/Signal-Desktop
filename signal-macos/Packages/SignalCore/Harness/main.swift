@@ -100,6 +100,7 @@ await runAsync("MessagingTests") {
     await runGroupTests()
     await runAttachmentTests()
     await runAttachmentCryptoTests()
+    await runLiveCDNTests()
     await runLiveTransportTests()
     await runUnauthChatTests()
     #if os(macOS)
