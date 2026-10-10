@@ -9,6 +9,7 @@ import Crypto
 import Foundation
 import LibSignalClient
 import SignalCore
+import SignalLogging
 import SignalStorage
 
 public enum GroupSendError: Error, Equatable {
@@ -36,6 +37,8 @@ public protocol GroupDistributionSender: Sendable {
 /// receiver chains (no spurious redistribution), while a member removal
 /// bumps the epoch and starts a fresh chain the removed member never gets.
 public final class GroupManager: @unchecked Sendable {
+    private static let logger = Logger(subsystem: "groups", category: "send")
+
     private let store: any SignalProtocolStore
     private let groups: GroupStateTable
     private let ourAddress: ProtocolAddress
@@ -179,6 +182,8 @@ public final class GroupManager: @unchecked Sendable {
             // epoch: a removal mid-send must not resume the removed
             // member's old chain.
             guard let fresh = try groups.load(masterKey: masterKey) else {
+                // No identifiers: group ids stay out of the log.
+                Self.logger.error("group send retry: group vanished after membership change")
                 throw GroupSendError.unknownGroup
             }
             let freshDistributionId = Self.distributionId(
@@ -239,8 +244,8 @@ public final class GroupManager: @unchecked Sendable {
         return try Padding.pad(content.serializedData())
     }
 
-    private func distributionKey(group: Data, epoch: UInt32, aci: String, deviceId: UInt32) -> String {
-        "\(group.hexString):\(epoch):\(aci):\(deviceId)"
+    private func distributionKey(groupHex: String, epoch: UInt32, aci: String, deviceId: UInt32) -> String {
+        "\(groupHex):\(epoch):\(aci):\(deviceId)"
     }
 
     private func ensureDistributed(
@@ -248,12 +253,13 @@ public final class GroupManager: @unchecked Sendable {
         distributionId: UUID
     ) async throws {
         let cert = try await certs.currentCertificate()
+        let groupHex = state.masterKey.hexString
         for memberAci in state.members where memberAci != ourAddress.name {
             let devices = try await sessions.ensureAllSessions(with: memberAci)
             for device in devices {
                 let deviceId = device.deviceId
                 let key = distributionKey(
-                    group: state.masterKey,
+                    groupHex: groupHex,
                     epoch: state.senderEpoch,
                     aci: memberAci,
                     deviceId: deviceId

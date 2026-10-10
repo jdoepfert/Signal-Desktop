@@ -277,8 +277,12 @@ public final class MessageStore: Sendable, MessageWriting {
             guard Int64(membership.revision) >= existing.revision else {
                 return
             }
-            let current =
-                (try? JSONDecoder().decode([String].self, from: Data(existing.membersJson.utf8))) ?? []
+            // A corrupt stored roster is a hard error, never a silent union
+            // onto [] (which would drop real members on the next update).
+            // It propagates to the receive path, which logs the reason.
+            guard let current = try? JSONDecoder().decode([String].self, from: Data(existing.membersJson.utf8)) else {
+                throw DatabaseError(message: "invalid group members")
+            }
             if Int64(membership.revision) == existing.revision {
                 // A sender-key authenticated message proves this account is
                 // currently able to send in the group. Learn newly observed

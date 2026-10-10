@@ -42,6 +42,7 @@ func runReceiveTests() async {
     await testSentSyncLandsInDestinationThread()
     await testSentSyncGroupBootstrapsRoster()
     testGroupRosterAddsSendersAtSameRevision()
+    testCorruptRosterDecodeThrows()
     await testSentSyncFromOtherSenderIgnored()
     await testPaddingFailureKeepsNothingAndDoesNotCrash()
     await testConcurrentDecryptSameSender()
@@ -619,6 +620,46 @@ private func testGroupRosterAddsSendersAtSameRevision() {
         )
     } catch {
         check("ReceiveTests.testGroupRosterAddsSendersAtSameRevision", false, "\(error)")
+    }
+}
+
+// A corrupt stored roster must surface, never silently union onto an empty
+// list (which would drop real members on the next update).
+private func testCorruptRosterDecodeThrows() {
+    do {
+        let local = "bbbbbbbb-1111-4222-8333-444444444444"
+        let rig = try ReceiverRig(ourAci: local, ourDevice: 3)
+        let masterKey = Data(repeating: 0x43, count: 32)
+        try rig.db.queue.write { connection in
+            try connection.execute(sql: """
+                INSERT INTO group_state (master_key, revision, members_json, sender_epoch)
+                VALUES (?, 4, 'not-json', 0)
+                """, arguments: [masterKey])
+        }
+        do {
+            try rig.store.withTransaction { transaction in
+                _ = try rig.messages.persist(
+                    NewMessage(
+                        senderAci: "cccccccc-1111-4222-8333-444444444444",
+                        body: "update over corrupt roster",
+                        sentTimestamp: 1_700_000_170_000,
+                        target: .group(masterKey: masterKey),
+                        membership: GroupMembership(
+                            masterKey: masterKey,
+                            revision: 5,
+                            added: [],
+                            removed: []
+                        )
+                    ),
+                    in: transaction
+                )
+            }
+            check("ReceiveTests.testCorruptRosterDecodeThrows", false, "no error thrown")
+        } catch {
+            check("ReceiveTests.testCorruptRosterDecodeThrows", true)
+        }
+    } catch {
+        check("ReceiveTests.testCorruptRosterDecodeThrows", false, "\(error)")
     }
 }
 

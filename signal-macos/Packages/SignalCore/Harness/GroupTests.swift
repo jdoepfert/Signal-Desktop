@@ -428,8 +428,9 @@ func runGroupTests() async {
             check(
                 "MessagingTests.testGroupRetryAfterRemovalUsesFreshChain",
                 retrySkdm.distributionId
-                    == GroupManager.distributionId(masterKey: masterKey, sender: aliceAddress, epoch: 2),
-                "\(retrySkdm.distributionId)"
+                    == GroupManager.distributionId(masterKey: masterKey, sender: aliceAddress, epoch: 2)
+                    && fresh.filter({ $0.aci == groupCarol || $0.aci == groupDave }).isEmpty,
+                "\(retrySkdm.distributionId) leaked=\(fresh.filter({ $0.aci == groupCarol || $0.aci == groupDave }).count)"
             )
         } catch {
             check("MessagingTests.testGroupRetryAfterRemovalUsesFreshChain", false, "\(error)")
