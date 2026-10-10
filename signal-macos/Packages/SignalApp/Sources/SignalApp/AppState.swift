@@ -925,11 +925,16 @@ public final class AppState: ObservableObject {
                 contentType: record.contentType,
                 key: record.key
             )
-            guard let bytes = try? await stack.attachments.download(pointer) else {
+            do {
+                let bytes = try await stack.attachments.download(pointer)
+                attachmentBytes[record.digest] = bytes
+                fetched = true
+            } catch {
+                // The row still renders as a file; the reason is logged for
+                // diagnosis (status codes only, via ErrorReason).
+                Self.logger.error("attachment fetch failed (\(ErrorReason.describe(error)))")
                 continue
             }
-            attachmentBytes[record.digest] = bytes
-            fetched = true
         }
         if fetched {
             objectWillChange.send()

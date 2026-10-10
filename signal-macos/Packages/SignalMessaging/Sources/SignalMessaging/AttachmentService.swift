@@ -14,6 +14,7 @@ import Crypto
 import Foundation
 import LibSignalClient
 import SignalCore
+import SignalLogging
 import SignalStorage
 
 public struct AttachmentPointer: Sendable, Equatable {
@@ -149,6 +150,8 @@ public final class AttachmentService: Sendable {
     /// Matches Desktop's attachment cap.
     public static let maxBytes: UInt64 = 100 * 1024 * 1024
 
+    private static let logger = Logger(subsystem: "net", category: "attachments")
+
     private let cdn: any CDNClient
     private let attachments: AttachmentTable
 
@@ -188,9 +191,17 @@ public final class AttachmentService: Sendable {
 
     public func download(_ pointer: AttachmentPointer) async throws -> Data {
         guard let record = try attachments.load(digest: pointer.digest) else {
+            Self.logger.error("attachment download failed: unknown key")
             throw AttachmentError.unknownKey
         }
-        let blob = try await cdn.get(cdnKey: record.cdnKey, cdnNumber: record.cdnNumber)
+        let blob: Data
+        do {
+            blob = try await cdn.get(cdnKey: record.cdnKey, cdnNumber: record.cdnNumber)
+        } catch {
+            // Status only — never keys, digests, or bytes (see ErrorReason).
+            Self.logger.error("attachment download GET failed (\(ErrorReason.describe(error)))")
+            throw error
+        }
         let url = FileManager.default.temporaryDirectory
             .appending(path: "signal-attachment-\(UUID().uuidString).bin")
         do {
@@ -207,6 +218,7 @@ public final class AttachmentService: Sendable {
             try FileManager.default.removeItem(at: url)
             return plaintext
         } catch {
+            Self.logger.error("attachment download verify failed (\(ErrorReason.describe(error)))")
             try? FileManager.default.removeItem(at: url)
             throw error
         }

@@ -364,4 +364,41 @@ func runLiveCDNTests() async {
     } catch {
         check("MessagingTests.testAttachmentUploadFormRejected", false, "\(error)")
     }
+
+    // CDN GET 404 throws transferFailed(status: 404) and leaves no temp file.
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let table = AttachmentTable(queue: db.queue)
+        let digest = Data("digest-404-case".utf8)
+        try table.save(
+            digest: digest, cdnKey: "missing-key", size: 4,
+            contentType: "image/jpeg", key: Data(repeating: 7, count: 64)
+        )
+        let formSend: LiveTransport.AuthenticatedSend = { _ in (200, Data()) }
+        let http: LiveCDNClient.HttpSend = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil
+            )!
+            return (Data(), response)
+        }
+        let client = LiveCDNClient(environment: .staging, formSend: formSend, http: http)
+        let service = AttachmentService(cdn: client, attachments: table)
+        let pointer = AttachmentPointer(
+            cdnKey: "missing-key", digest: digest, size: 4,
+            contentType: "image/jpeg", key: Data(repeating: 7, count: 64)
+        )
+        do {
+            _ = try await service.download(pointer)
+            check("MessagingTests.testAttachmentDownloadNotFoundCleansTemp", false, "no error thrown")
+        } catch let error as AttachmentError {
+            let leftovers = attachmentTempLeftovers().filter { $0.hasPrefix("signal-attachment-") }
+            check(
+                "MessagingTests.testAttachmentDownloadNotFoundCleansTemp",
+                error == .transferFailed(status: 404) && leftovers.isEmpty,
+                "\(error) leftovers=\(leftovers)"
+            )
+        }
+    } catch {
+        check("MessagingTests.testAttachmentDownloadNotFoundCleansTemp", false, "\(error)")
+    }
 }
