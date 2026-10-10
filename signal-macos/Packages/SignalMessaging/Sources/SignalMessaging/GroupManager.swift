@@ -123,6 +123,31 @@ public final class GroupManager: @unchecked Sendable {
         return true
     }
 
+    /// Applies fetched server state as one gated unit: the revision-gated
+    /// roster merge plus the title store. A stale fetch changes nothing
+    /// (returns false) — the title never bypasses the gate the roster
+    /// honors.
+    @discardableResult
+    public func applyFetchedState(
+        _ fetched: FetchedGroupState,
+        masterKey: Data,
+        titles: ConversationStore
+    ) throws -> Bool {
+        guard
+            try mergeFetchedGroup(
+                masterKey: masterKey,
+                revision: fetched.revision,
+                members: fetched.members
+            )
+        else {
+            return false
+        }
+        if let title = fetched.title {
+            try titles.setGroupTitle(masterKey: masterKey, title: title)
+        }
+        return true
+    }
+
     @discardableResult
     public func sendTextToGroup(_ text: String, group masterKey: Data) async throws -> UInt64 {
         guard let state = try groups.load(masterKey: masterKey) else {

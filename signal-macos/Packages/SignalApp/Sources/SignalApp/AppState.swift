@@ -401,16 +401,14 @@ public final class AppState: ObservableObject {
                 http: Self.storageHttp(),
                 credentials: presented
             )
-            // Revision-gated: a stale fetch never downgrades the roster.
-            // The server lists inactive members too, so they stay.
-            _ = try stack.groups.mergeFetchedGroup(
+            // Revision-gated: a stale fetch never downgrades the roster
+            // or the displayed title. The server lists inactive members
+            // too, so they stay.
+            _ = try stack.groups.applyFetchedState(
+                fetched,
                 masterKey: masterKey,
-                revision: fetched.revision,
-                members: fetched.members
+                titles: stack.conversations
             )
-            if let title = fetched.title {
-                try stack.conversations.setGroupTitle(masterKey: masterKey, title: title)
-            }
             return true
         } catch GroupFetchError.transferFailed(status: 403) {
             self.error = "Cannot send: this group is unavailable (you may have been removed)."
@@ -528,8 +526,8 @@ public final class AppState: ObservableObject {
         if let name = conversation.name, !name.isEmpty {
             return name
         }
-        // Server group titles arrive with a later milestone; until then a
-        // stable short handle instead of the raw id.
+        // Group titles arrive via the server fetch (before the first
+        // fetch, a stable short handle instead of the raw id).
         if conversation.kind == "group", conversation.id.hasPrefix("group:") {
             return "Group \(conversation.id.dropFirst(6).prefix(8))"
         }

@@ -621,6 +621,36 @@ func runGroupTests() async {
             check("MessagingTests.testGroupFetchSkipsBadMember", false, "\(error)")
         }
 
+        // A stale fetch changes nothing: roster keeps the newer revision
+        // and the displayed title is not regressed.
+        do {
+            let staleKey = Data(repeating: 0x0E, count: 32)
+            try manager.joinKnownGroup(
+                masterKey: staleKey, revision: 10, members: [groupAlice.lowercased()]
+            )
+            let conversations = ConversationStore(queue: db.queue)
+            _ = try conversations.conversation(forGroup: staleKey)
+            try conversations.setGroupTitle(masterKey: staleKey, title: "Current")
+            let stale = FetchedGroupState(
+                members: [groupBob.lowercased()], revision: 9, title: "Stale"
+            )
+            let applied = try manager.applyFetchedState(
+                stale, masterKey: staleKey, titles: conversations
+            )
+            let stored = try groups.load(masterKey: staleKey)
+            let thread = try conversations.conversation(forGroup: staleKey)
+            check(
+                "MessagingTests.testGroupFetchStaleKeepsTitle",
+                applied == false
+                    && stored?.revision == 10
+                    && stored?.members == [groupAlice.lowercased()]
+                    && thread.name == "Current",
+                "applied=\(applied) stored=\(String(describing: stored)) name=\(String(describing: thread.name))"
+            )
+        } catch {
+            check("MessagingTests.testGroupFetchStaleKeepsTitle", false, "\(error)")
+        }
+
         // Embedded server public params parse (pins the per-environment
         // constants against libsignal, TrustRoots-style).
         do {
