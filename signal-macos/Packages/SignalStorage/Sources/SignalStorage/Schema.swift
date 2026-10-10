@@ -9,7 +9,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 10
+    public static let currentVersion = 11
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -245,6 +245,20 @@ public enum MigrationChain {
                 t.add(column: "needs_refresh", .integer).notNull().defaults(to: 0)
             }
             try db.execute(sql: "UPDATE group_state SET revision = 0, needs_refresh = 1")
+        }
+        migrator.registerMigration("v11-sender-key-info") { db in
+            // Our per-group sender-key state the Desktop way: a random
+            // distribution id, its creation date, and the devices that
+            // already hold our key. Replaces the derived
+            // (master key, address, epoch) distribution id; the
+            // `sender_epoch` column stays in place (SQLite column drops
+            // are not worth a table rebuild) but is no longer read.
+            try db.create(table: "sender_key_info") { t in
+                t.column("master_key", .blob).primaryKey()
+                t.column("distribution_id", .text).notNull()
+                t.column("created_at", .integer).notNull()
+                t.column("member_devices_json", .text).notNull()
+            }
         }
         return migrator
     }

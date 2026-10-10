@@ -89,36 +89,241 @@ final class FakeGroupSender: GroupDistributionSender, @unchecked Sendable {
     }
 }
 
+/// Mutable bundle source for group tests: serves BOTH `PreKeyService`
+/// (SessionSetup, the sender-key device fanout) and `PreKeyBundleFetching`
+/// (OutgoingSender, the SKDM sends). ACI keys normalize case-insensitively:
+/// rosters carry mixed-case ACIs (e.g. `groupBob`), so a case-sensitive
+/// fake would miss every lookup after the roster is lowercased.
+final class MutableGroupBundles: PreKeyService, PreKeyBundleFetching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var material = [String: (IdentityKey, [PreKeyBundle])]()
+
+    func setMaterial(aci: String, identity: IdentityKey, bundles: [PreKeyBundle]) {
+        lock.withLock { material[aci.lowercased()] = (identity, bundles) }
+    }
+
+    func fetchBundles(for aci: String) async throws -> (IdentityKey, [PreKeyBundle]) {
+        guard let entry = lock.withLock({ material[aci.lowercased()] }) else {
+            throw PreKeyError.unknownContact
+        }
+        return entry
+    }
+
+    func fetchBundles(
+        for aci: String,
+        deviceIds: [UInt32]?,
+        accessKey: Data?
+    ) async throws -> [PreKeyBundle] {
+        let (_, bundles): (IdentityKey, [PreKeyBundle]) = try await fetchBundles(for: aci)
+        guard let deviceIds else {
+            return bundles
+        }
+        return bundles.filter { deviceIds.contains($0.deviceId) }
+    }
+}
+
+private struct UnexpectedSendType: Error {
+    let type: Int
+}
+
+/// Decrypts one recorded `OutgoingSender` message (authenticated 1:1 send:
+/// type 3 prekey or type 1 ciphertext) with the recipient's InMemory store.
+/// Mirrors `SendTests`' `decryptPadded` pattern for the non-sealed case
+/// (these tests set no profile keys, so the outbox sends authenticated).
+private func decryptRecordedSend(
+    _ message: SendRequest.Message,
+    to recipient: ProtocolAddress,
+    from sender: ProtocolAddress,
+    store: InMemorySignalProtocolStore
+) throws -> Data {
+    let context = NullContext()
+    switch message.type {
+    case 3:
+        return try signalDecryptPreKey(
+            message: PreKeySignalMessage(bytes: message.content),
+            from: sender,
+            localAddress: recipient,
+            sessionStore: store,
+            identityStore: store,
+            preKeyStore: store,
+            signedPreKeyStore: store,
+            kyberPreKeyStore: store,
+            context: context
+        )
+    case 1:
+        return try signalDecrypt(
+            message: SignalMessage(bytes: message.content),
+            from: sender,
+            to: recipient,
+            sessionStore: store,
+            identityStore: store,
+            context: context
+        )
+    default:
+        throw UnexpectedSendType(type: message.type)
+    }
+}
+
+/// Alice's side of the group fixture: a GRDB-backed rig (the real stores
+/// the sender runs against) with provisioned keys, an `OutgoingSender` over
+/// a recording submitter, and a `GroupManager` wired the Desktop way
+/// (SKDMs via the outbox, ciphertext via the distribution sender).
+private struct GroupRig {
+    let alice: ReceiverRig
+    let outbox: OutgoingSender
+    let submitter: RecordingSubmitter
+    let bundles: MutableGroupBundles
+    let manager: GroupManager
+    let sender: FakeGroupSender
+    let groups: GroupStateTable
+    let senderKeys: SenderKeyInfoTable
+    let certs: FakeCerts
+    let trustRoot: PublicKey
+    var aliceAddress: ProtocolAddress { alice.address }
+}
+
+private func makeGroupRig(
+    bobBundle: PreKeyBundle,
+    bobIdentity: IdentityKey,
+    carolBundle: PreKeyBundle,
+    carolIdentity: IdentityKey,
+    daveBundle: PreKeyBundle,
+    daveIdentity: IdentityKey
+) throws -> GroupRig {
+    let context = NullContext()
+    let aliceRig = try ReceiverRig(ourAci: groupAlice, ourDevice: 1)
+    try aliceRig.provisionOwnKeys()
+    let bundles = MutableGroupBundles()
+    bundles.setMaterial(aci: groupBob, identity: bobIdentity, bundles: [bobBundle])
+    bundles.setMaterial(aci: groupCarol, identity: carolIdentity, bundles: [carolBundle])
+    bundles.setMaterial(aci: groupDave, identity: daveIdentity, bundles: [daveBundle])
+
+    // Fabricated sender cert for alice (offline trust root).
+    let trustKeys = IdentityKeyPair.generate()
+    let serverKeys = IdentityKeyPair.generate()
+    let senderCert = try SenderCertificate(
+        sender: SealedSenderAddress(e164: nil, uuidString: groupAlice, deviceId: 1),
+        publicKey: aliceRig.identity.identityKeyPair(context: context).publicKey,
+        expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
+        signerCertificate: ServerCertificate(
+            keyId: 1,
+            publicKey: serverKeys.publicKey,
+            trustRoot: trustKeys.privateKey
+        ),
+        signerKey: serverKeys.privateKey
+    )
+    let certs = FakeCerts(first: senderCert, second: senderCert)
+    let submitter = RecordingSubmitter()
+    let contacts = ContactTable(queue: aliceRig.db.queue)
+    let conversations = ConversationStore(queue: aliceRig.db.queue)
+    let outbox = OutgoingSender(
+        store: aliceRig.store,
+        identity: aliceRig.identity,
+        messages: aliceRig.messages,
+        contacts: contacts,
+        conversations: conversations,
+        ourAci: groupAlice,
+        ourDeviceId: 1,
+        certs: certs,
+        bundles: bundles,
+        submitter: submitter
+    )
+    let groups = GroupStateTable(queue: aliceRig.db.queue)
+    let senderKeys = SenderKeyInfoTable(queue: aliceRig.db.queue)
+    let sessions = SessionSetup(keys: bundles, store: aliceRig.store, ourAddress: aliceRig.address)
+    let sender = FakeGroupSender()
+    let manager = GroupManager(
+        store: aliceRig.store,
+        groups: groups,
+        ourAddress: aliceRig.address,
+        certs: certs,
+        sessions: sessions,
+        sender: sender,
+        outbox: outbox,
+        senderKeys: senderKeys
+    )
+    return GroupRig(
+        alice: aliceRig,
+        outbox: outbox,
+        submitter: submitter,
+        bundles: bundles,
+        manager: manager,
+        sender: sender,
+        groups: groups,
+        senderKeys: senderKeys,
+        certs: certs,
+        trustRoot: trustKeys.publicKey
+    )
+}
+
+/// Bob's side: his InMemory store holds the recipient key material, so a
+/// `GroupManager` over it can receive distributions and group messages. The
+/// outbox stack is a scratch rig (receive-only in these tests); it is never
+/// used to send.
+private func makeBobManager(
+    bobStore: InMemorySignalProtocolStore,
+    bundles: MutableGroupBundles,
+    certs: FakeCerts,
+    sender: FakeGroupSender
+) throws -> GroupManager {
+    let bobRig = try ReceiverRig(ourAci: groupBob, ourDevice: 1)
+    try bobRig.provisionOwnKeys()
+    let bobAddress = try ProtocolAddress(name: groupBob.lowercased(), deviceId: 1)
+    let bobOutbox = OutgoingSender(
+        store: bobRig.store,
+        identity: bobRig.identity,
+        messages: bobRig.messages,
+        contacts: ContactTable(queue: bobRig.db.queue),
+        conversations: ConversationStore(queue: bobRig.db.queue),
+        ourAci: groupBob,
+        ourDeviceId: 1,
+        certs: certs,
+        bundles: bundles,
+        submitter: RecordingSubmitter()
+    )
+    return GroupManager(
+        store: bobStore,
+        groups: GroupStateTable(queue: bobRig.db.queue),
+        ourAddress: bobAddress,
+        certs: certs,
+        sessions: SessionSetup(keys: bundles, store: bobStore, ourAddress: bobAddress),
+        sender: sender,
+        outbox: bobOutbox,
+        senderKeys: SenderKeyInfoTable(queue: bobRig.db.queue)
+    )
+}
+
 func runGroupTests() async {
     do {
         let context = NullContext()
-        let db = try SignalDatabase.open(path: nil, key: "k")
-        let aliceStore = InMemorySignalProtocolStore()
         let bobStore = InMemorySignalProtocolStore()
-        let aliceAddress = try ProtocolAddress(name: groupAlice, deviceId: 1)
-        let bobAddress = try ProtocolAddress(name: groupBob, deviceId: 1)
+        let bobAddress = try ProtocolAddress(name: groupBob.lowercased(), deviceId: 1)
+        let aliceAddress = try ProtocolAddress(name: groupAlice.lowercased(), deviceId: 1)
 
         // Bob publishes his own bundle (identity must match his store).
         let bobIdentity = try bobStore.identityKeyPair(context: context)
         let bobPreKey = PrivateKey.generate()
         let bobSignedPreKey = PrivateKey.generate()
         let bobKyberPreKey = KEMKeyPair.generate()
+        let bobSignedSig = bobIdentity.privateKey.generateSignature(
+            message: bobSignedPreKey.publicKey.serialize()
+        )
+        let bobKyberSig = bobIdentity.privateKey.generateSignature(
+            message: bobKyberPreKey.publicKey.serialize()
+        )
+        let bobRegistration = try bobStore.localRegistrationId(context: context)
         let bundle = try PreKeyBundle(
-            registrationId: bobStore.localRegistrationId(context: context),
+            registrationId: bobRegistration,
             deviceId: 1,
             prekeyId: 4570,
             prekey: bobPreKey.publicKey,
             signedPrekeyId: 3006,
             signedPrekey: bobSignedPreKey.publicKey,
-            signedPrekeySignature: bobIdentity.privateKey.generateSignature(
-                message: bobSignedPreKey.publicKey.serialize()
-            ),
+            signedPrekeySignature: bobSignedSig,
             identity: bobIdentity.identityKey,
             kyberPrekeyId: 8888,
             kyberPrekey: bobKyberPreKey.publicKey,
-            kyberPrekeySignature: bobIdentity.privateKey.generateSignature(
-                message: bobKyberPreKey.publicKey.serialize()
-            )
+            kyberPrekeySignature: bobKyberSig
         )
         try bobStore.storePreKey(
             PreKeyRecord(id: 4570, privateKey: bobPreKey),
@@ -130,9 +335,7 @@ func runGroupTests() async {
                 id: 3006,
                 timestamp: 42000,
                 privateKey: bobSignedPreKey,
-                signature: bobIdentity.privateKey.generateSignature(
-                    message: bobSignedPreKey.publicKey.serialize()
-                )
+                signature: bobSignedSig
             ),
             id: 3006,
             context: context
@@ -142,27 +345,10 @@ func runGroupTests() async {
                 id: 8888,
                 timestamp: 42000,
                 keyPair: bobKyberPreKey,
-                signature: bobIdentity.privateKey.generateSignature(
-                    message: bobKyberPreKey.publicKey.serialize()
-                )
+                signature: bobKyberSig
             ),
             id: 8888,
             context: context
-        )
-
-        // Fabricated sender cert for alice (offline trust root).
-        let trustKeys = IdentityKeyPair.generate()
-        let serverKeys = IdentityKeyPair.generate()
-        let senderCert = try SenderCertificate(
-            sender: SealedSenderAddress(e164: nil, uuidString: groupAlice, deviceId: 1),
-            publicKey: aliceStore.identityKeyPair(context: context).publicKey,
-            expiration: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000,
-            signerCertificate: ServerCertificate(
-                keyId: 1,
-                publicKey: serverKeys.publicKey,
-                trustRoot: trustKeys.privateKey
-            ),
-            signerKey: serverKeys.privateKey
         )
 
         let carolKeys = IdentityKeyPair.generate()
@@ -207,60 +393,58 @@ func runGroupTests() async {
                 message: daveKyberPreKey.publicKey.serialize()
             )
         )
-        let fakeKeys = FakePreKeys(material: [
-            groupBob: (bobIdentity.identityKey, [bundle]),
-            groupCarol: (carolKeys.identityKey, [carolBundle]),
-            groupDave: (daveKeys.identityKey, [daveBundle]),
-        ])
-        let sessions = SessionSetup(keys: fakeKeys, store: aliceStore, ourAddress: aliceAddress)
-        let certs = FakeCerts(first: senderCert, second: senderCert)
-        let sender = FakeGroupSender()
-        let groups = GroupStateTable(queue: db.queue)
-        let masterKey = Data(repeating: 0x07, count: 32)
-        let manager = GroupManager(
-            store: aliceStore,
-            groups: groups,
-            ourAddress: aliceAddress,
-            certs: certs,
-            sessions: sessions,
-            sender: sender
+        let rig = try makeGroupRig(
+            bobBundle: bundle,
+            bobIdentity: bobIdentity.identityKey,
+            carolBundle: carolBundle,
+            carolIdentity: carolKeys.identityKey,
+            daveBundle: daveBundle,
+            daveIdentity: daveKeys.identityKey
         )
+        let manager = rig.manager
+        let sender = rig.sender
+        let groups = rig.groups
+        let senderKeys = rig.senderKeys
+        let trustRoot = rig.trustRoot
+        let masterKey = Data(repeating: 0x07, count: 32)
         try manager.joinKnownGroup(masterKey: masterKey, revision: 1, members: [groupAlice, groupBob])
 
-        // First send distributes to bob, then sends once (both sealed).
+        // First send distributes the SKDM via the outbox submitter, then
+        // the ciphertext via the distribution sender (both sealed).
         try await manager.sendTextToGroup("hi", group: masterKey)
+        let skdmRequests = rig.submitter.requests.count
         let afterFirst = sender.sends.count
 
-        // Second send reuses the distribution.
+        // Second send reuses the distribution: no new SKDM.
         try await manager.sendTextToGroup("hi again", group: masterKey)
 
-        // Deliver bob's SKDM + first ciphertext through his manager.
-        let bobGroups = GroupStateTable(queue: db.queue)
-        let bobManager = GroupManager(
-            store: bobStore,
-            groups: bobGroups,
-            ourAddress: bobAddress,
-            certs: certs,
-            sessions: SessionSetup(keys: fakeKeys, store: bobStore, ourAddress: bobAddress),
+        // Deliver bob's SKDM (from the submitter) + first ciphertext
+        // (from the distribution sender) through his manager.
+        let bobManager = try makeBobManager(
+            bobStore: bobStore,
+            bundles: rig.bundles,
+            certs: rig.certs,
             sender: sender
         )
-        let skdmEnvelope = sender.sends[0].envelope.bytes
-        // Distribution envelopes carry session-sealed SKDM bytes.
-        let skdmBytes = try sealedSenderDecrypt(
-            skdmEnvelope,
+        let skdmRequest = rig.submitter.requests[0]
+        let skdmRecorded = skdmRequest.messages[0]
+        let skdmPadded = try decryptRecordedSend(
+            skdmRecorded,
             to: bobAddress,
             from: aliceAddress,
-            recipientStore: bobStore,
-            trustRoot: trustKeys.publicKey,
-            context: context
+            store: bobStore
         )
+        let skdmContent = try SignalServiceProtos_Content(
+            serializedBytes: Padding.unpad(skdmPadded)
+        )
+        let skdmBytes = skdmContent.senderKeyDistributionMessage
         try bobManager.receiveDistribution(skdmBytes, from: aliceAddress)
         let messageBytes = try sealedSenderDecrypt(
-            sender.sends[1].envelope.bytes,
+            sender.sends[0].envelope.bytes,
             to: bobAddress,
             from: aliceAddress,
             recipientStore: bobStore,
-            trustRoot: trustKeys.publicKey,
+            trustRoot: trustRoot,
             context: context
         )
         let received = try bobManager.receiveGroupMessage(
@@ -268,8 +452,11 @@ func runGroupTests() async {
             from: aliceAddress
         )
 
-        // Membership change: carol joins, next send fails once on the stale
-        // set, redistributes to carol only, retries once and succeeds.
+        // Membership change: carol joins; the next send distributes her
+        // SKDM via the outbox, then fails once on the first ciphertext
+        // (bob's) and retries once against the fresh roster. Sends: one
+        // ciphertext each for the first two sends, then bob-fail on the
+        // attempt, bob + carol on the retry.
         try manager.joinKnownGroup(
             masterKey: masterKey,
             revision: 2,
@@ -281,11 +468,18 @@ func runGroupTests() async {
 
         check(
             "MessagingTests.testGroupSend",
-            afterFirst == 2
-                && sender.sends.count == 7
+            skdmRequests == 1
+                && skdmRequest.destination == groupBob.lowercased()
+                && afterFirst == 1
+                && sender.sends.count == 5
+                && rig.submitter.requests.count == 2
+                && rig.submitter.requests.map(\.destination) == [
+                    groupBob.lowercased(), groupCarol.lowercased(),
+                ]
                 && received.body == "hi"
                 && received.senderAci == groupAlice
-                && carolSends.count == 3
+                && carolSends.count == 1,
+            "skdmRequests=\(skdmRequests) dest=\(skdmRequest.destination) afterFirst=\(afterFirst) sends=\(sender.sends.count) requests=\(rig.submitter.requests.count) body=\(received.body) senderAci=\(received.senderAci) carolSends=\(carolSends.count)"
         )
 
         // Retry uses the refreshed roster: a member added mid-send gets the
@@ -301,10 +495,13 @@ func runGroupTests() async {
             sender.failNextSend = true
             try await manager.sendTextToGroup("hello dave", group: masterKey)
             let daveSends = sender.sends.filter { $0.aci == groupDave }
+            let daveSkdm = rig.submitter.requests.filter {
+                $0.destination == groupDave.lowercased()
+            }
             check(
                 "MessagingTests.testGroupSendRetryUsesFreshRoster",
-                daveSends.count == 2,
-                "daveSends=\(daveSends.count)"
+                daveSends.count == 1 && daveSkdm.count == 1,
+                "daveSends=\(daveSends.count) daveSkdm=\(daveSkdm.count)"
             )
         } catch {
             check("MessagingTests.testGroupSendRetryUsesFreshRoster", false, "\(error)")
@@ -367,93 +564,261 @@ func runGroupTests() async {
             check("MessagingTests.testGroupSendNeedsOtherMembers", false, "\(error)")
         }
 
-        // Removing a member rotates our sender chain: the epoch bumps and a
-        // continuing member gets a fresh SKDM, not ciphertext on the old
-        // chain a removed member can still read.
+        // The SKDM travels inside Content: the recorded send decrypts,
+        // through Desktop's receive path (unpad + Content parse, the same
+        // steps `EnvelopeReceiver.decode` runs on session plaintext), to a
+        // Content with only field 7 set.
         do {
-            let epochBefore = try groups.load(masterKey: masterKey)?.senderEpoch
+            let key = Data(repeating: 0x21, count: 32)
             try manager.joinKnownGroup(
-                masterKey: masterKey,
-                revision: 4,
-                members: [groupAlice, groupCarol, groupDave]
+                masterKey: key, revision: 1, members: [groupAlice, groupBob]
             )
-            let epochAfterRemoval = try groups.load(masterKey: masterKey)?.senderEpoch
-            // Pure addition rotates nothing.
-            try manager.joinKnownGroup(
-                masterKey: masterKey,
-                revision: 5,
-                members: [groupAlice, groupBob, groupCarol, groupDave]
-            )
-            let epochAfterAddition = try groups.load(masterKey: masterKey)?.senderEpoch
-            let carolBefore = sender.sends.filter { $0.aci == groupCarol }.count
-            try await manager.sendTextToGroup("rotated", group: masterKey)
-            let carolAfter = sender.sends.filter { $0.aci == groupCarol }.count
-            let ourAddress = try ProtocolAddress(name: groupAlice, deviceId: 1)
-            check(
-                "MessagingTests.testGroupRemovalRotatesSenderKey",
-                epochBefore == 0 && epochAfterRemoval == 1 && epochAfterAddition == 1
-                    && carolAfter == carolBefore + 2
-                    && GroupManager.distributionId(masterKey: masterKey, sender: ourAddress, epoch: 0)
-                        != GroupManager.distributionId(masterKey: masterKey, sender: ourAddress, epoch: 1),
-                "epochs=\(String(describing: epochBefore))/\(String(describing: epochAfterRemoval))/\(String(describing: epochAfterAddition)) carol+\(carolAfter - carolBefore)"
-            )
-        } catch {
-            check("MessagingTests.testGroupRemovalRotatesSenderKey", false, "\(error)")
-        }
-
-        // A removal mid-send rotates the retry itself onto the fresh chain:
-        // the redistributed SKDM carries the new epoch's distribution id.
-        do {
-            let before = sender.sends.count
-            sender.mutateBeforeNextThrow = {
-                try? manager.joinKnownGroup(
-                    masterKey: masterKey,
-                    revision: 6,
-                    members: [groupAlice, groupBob]
-                )
-            }
-            sender.failNextSend = true
-            try await manager.sendTextToGroup("after removal", group: masterKey)
-            let fresh = sender.sends.dropFirst(before)
-            let retrySkdmSealed = fresh.dropFirst().first!.envelope.bytes
-            let retrySkdmBytes = try sealedSenderDecrypt(
-                retrySkdmSealed,
+            let before = rig.submitter.requests.count
+            try await manager.sendTextToGroup("skdm shape", group: key)
+            let request = rig.submitter.requests[before]
+            let storedId = try senderKeys.load(masterKey: key)?.distributionId
+            let recorded = request.messages[0]
+            let padded = try decryptRecordedSend(
+                recorded,
                 to: bobAddress,
                 from: aliceAddress,
-                recipientStore: bobStore,
-                trustRoot: trustKeys.publicKey,
-                context: context
+                store: bobStore
             )
-            let retrySkdm = try SenderKeyDistributionMessage(bytes: retrySkdmBytes)
-            check(
-                "MessagingTests.testGroupRetryAfterRemovalUsesFreshChain",
-                retrySkdm.distributionId
-                    == GroupManager.distributionId(masterKey: masterKey, sender: aliceAddress, epoch: 2)
-                    && fresh.filter({ $0.aci == groupCarol || $0.aci == groupDave }).isEmpty,
-                "\(retrySkdm.distributionId) leaked=\(fresh.filter({ $0.aci == groupCarol || $0.aci == groupDave }).count)"
+            // Desktop's receive path on session plaintext.
+            let content = try SignalServiceProtos_Content(
+                serializedBytes: Padding.unpad(padded)
+            )
+            var expected = SignalServiceProtos_Content()
+            expected.senderKeyDistributionMessage = content.senderKeyDistributionMessage
+            let skdm = try SenderKeyDistributionMessage(
+                bytes: content.senderKeyDistributionMessage
+            )
+            try checkT(
+                "MessagingTests.testSkdmTravelsInsideContent",
+                request.destination == groupBob.lowercased()
+                    && content == expected
+                    && content.hasSenderKeyDistributionMessage
+                    && skdm.distributionId == storedId,
+                "type=\(recorded.type) stored=\(String(describing: storedId))"
             )
         } catch {
-            check("MessagingTests.testGroupRetryAfterRemovalUsesFreshChain", false, "\(error)")
+            check("MessagingTests.testSkdmTravelsInsideContent", false, "\(error)")
+        }
+
+        // A new device of an existing member gets the SKDM first: only its
+        // account is sent to, and memberDevices gains the new device.
+        do {
+            let key = Data(repeating: 0x22, count: 32)
+            try manager.joinKnownGroup(
+                masterKey: key, revision: 1, members: [groupAlice, groupBob]
+            )
+            let first = try await manager.prepareSenderKey(group: key)
+            let before = rig.submitter.requests.count
+            // Bob adds a second device under the SAME account identity.
+            let bobSecondPreKey = PrivateKey.generate()
+            try bobStore.storePreKey(
+                PreKeyRecord(id: 9001, privateKey: bobSecondPreKey),
+                id: 9001,
+                context: context
+            )
+            let bobSecondBundle = try PreKeyBundle(
+                registrationId: bobRegistration,
+                deviceId: 2,
+                prekeyId: 9001,
+                prekey: bobSecondPreKey.publicKey,
+                signedPrekeyId: 3006,
+                signedPrekey: bobSignedPreKey.publicKey,
+                signedPrekeySignature: bobSignedSig,
+                identity: bobIdentity.identityKey,
+                kyberPrekeyId: 8888,
+                kyberPrekey: bobKyberPreKey.publicKey,
+                kyberPrekeySignature: bobKyberSig
+            )
+            rig.bundles.setMaterial(
+                aci: groupBob,
+                identity: bobIdentity.identityKey,
+                bundles: [bundle, bobSecondBundle]
+            )
+            let second = try await manager.prepareSenderKey(group: key)
+            let fresh = rig.submitter.requests.dropFirst(before)
+            let info = try senderKeys.load(masterKey: key)
+            let secondDeviceMessage = fresh.first?.messages.first {
+                $0.deviceId == 2
+            }
+            var skdmOk = false
+            if let recorded = secondDeviceMessage {
+                let bobSecond = try ProtocolAddress(
+                    name: groupBob.lowercased(), deviceId: 2
+                )
+                let padded = try decryptRecordedSend(
+                    recorded,
+                    to: bobSecond,
+                    from: aliceAddress,
+                    store: bobStore
+                )
+                let content = try SignalServiceProtos_Content(
+                    serializedBytes: Padding.unpad(padded)
+                )
+                var expected = SignalServiceProtos_Content()
+                expected.senderKeyDistributionMessage =
+                    content.senderKeyDistributionMessage
+                let freshSkdmId = try SenderKeyDistributionMessage(
+                    bytes: content.senderKeyDistributionMessage
+                ).distributionId
+                skdmOk = content == expected
+                    && content.hasSenderKeyDistributionMessage
+                    && freshSkdmId == second.distributionId
+            }
+            try checkT(
+                "MessagingTests.testNewDeviceGetsSkdmFirst",
+                second.distributionId == first.distributionId
+                    && fresh.count == 1
+                    && fresh.first?.destination == groupBob.lowercased()
+                    && skdmOk
+                    && info?.memberDevices == Set([
+                        "\(groupBob.lowercased()):1",
+                        "\(groupBob.lowercased()):2",
+                    ]),
+                "fresh=\(fresh.count) info=\(String(describing: info))"
+            )
+        } catch {
+            check("MessagingTests.testNewDeviceGetsSkdmFirst", false, "\(error)")
+        }
+
+        // Dropping a member rotates the sender key: the next prepare
+        // returns a new distribution id, and the SKDM goes to the
+        // remaining member's devices only. (Bob's second device from the
+        // previous check is unlisted again: each check pins the exact
+        // material it asserts about.)
+        do {
+            rig.bundles.setMaterial(
+                aci: groupBob, identity: bobIdentity.identityKey, bundles: [bundle]
+            )
+            let key = Data(repeating: 0x23, count: 32)
+            try manager.joinKnownGroup(
+                masterKey: key,
+                revision: 1,
+                members: [groupAlice, groupBob, groupCarol]
+            )
+            let first = try await manager.prepareSenderKey(group: key)
+            try manager.joinKnownGroup(
+                masterKey: key, revision: 2, members: [groupAlice, groupCarol]
+            )
+            let before = rig.submitter.requests.count
+            let second = try await manager.prepareSenderKey(group: key)
+            let fresh = rig.submitter.requests.dropFirst(before)
+            let info = try senderKeys.load(masterKey: key)
+            try checkT(
+                "MessagingTests.testRemovalResetsSenderKey",
+                second.distributionId != first.distributionId
+                    && fresh.count == 1
+                    && fresh.first?.destination == groupCarol.lowercased()
+                    && info?.distributionId == second.distributionId
+                    && info?.memberDevices == Set(["\(groupCarol.lowercased()):1"]),
+                "fresh=\(fresh.map(\.destination)) info=\(String(describing: info))"
+            )
+        } catch {
+            check("MessagingTests.testRemovalResetsSenderKey", false, "\(error)")
+        }
+
+        // A sender key older than 90 days resets on next use.
+        do {
+            rig.bundles.setMaterial(
+                aci: groupBob, identity: bobIdentity.identityKey, bundles: [bundle]
+            )
+            let key = Data(repeating: 0x24, count: 32)
+            try manager.joinKnownGroup(
+                masterKey: key, revision: 1, members: [groupAlice, groupBob]
+            )
+            let first = try await manager.prepareSenderKey(group: key)
+            let agedMs = Int64(Date().timeIntervalSince1970 * 1000)
+                - 91 * 24 * 60 * 60 * 1000
+            try senderKeys.save(StoredSenderKeyInfo(
+                masterKey: key,
+                distributionId: first.distributionId,
+                createdAtMs: agedMs,
+                memberDevices: Set(["\(groupBob.lowercased()):1"])
+            ))
+            let before = rig.submitter.requests.count
+            let second = try await manager.prepareSenderKey(group: key)
+            let fresh = rig.submitter.requests.dropFirst(before)
+            let info = try senderKeys.load(masterKey: key)
+            try checkT(
+                "MessagingTests.testSenderKeyExpiryResets",
+                second.distributionId != first.distributionId
+                    && fresh.count == 1
+                    && fresh.first?.destination == groupBob.lowercased()
+                    && info?.distributionId == second.distributionId
+                    && info?.memberDevices == Set(["\(groupBob.lowercased()):1"]),
+                "fresh=\(fresh.count) info=\(String(describing: info))"
+            )
+        } catch {
+            check("MessagingTests.testSenderKeyExpiryResets", false, "\(error)")
+        }
+
+        // memberDevices survives a restart: a new manager over the same DB
+        // sends no SKDM to devices that already hold our key.
+        do {
+            rig.bundles.setMaterial(
+                aci: groupBob, identity: bobIdentity.identityKey, bundles: [bundle]
+            )
+            let key = Data(repeating: 0x25, count: 32)
+            try manager.joinKnownGroup(
+                masterKey: key, revision: 1, members: [groupAlice, groupBob]
+            )
+            let first = try await manager.prepareSenderKey(group: key)
+            let freshSubmitter = RecordingSubmitter()
+            let freshOutbox = OutgoingSender(
+                store: rig.alice.store,
+                identity: rig.alice.identity,
+                messages: rig.alice.messages,
+                contacts: ContactTable(queue: rig.alice.db.queue),
+                conversations: ConversationStore(queue: rig.alice.db.queue),
+                ourAci: groupAlice,
+                ourDeviceId: 1,
+                certs: rig.certs,
+                bundles: rig.bundles,
+                submitter: freshSubmitter
+            )
+            let restarted = GroupManager(
+                store: rig.alice.store,
+                groups: GroupStateTable(queue: rig.alice.db.queue),
+                ourAddress: rig.aliceAddress,
+                certs: rig.certs,
+                sessions: SessionSetup(
+                    keys: rig.bundles,
+                    store: rig.alice.store,
+                    ourAddress: rig.aliceAddress
+                ),
+                sender: sender,
+                outbox: freshOutbox,
+                senderKeys: SenderKeyInfoTable(queue: rig.alice.db.queue)
+            )
+            let second = try await restarted.prepareSenderKey(group: key)
+            check(
+                "MessagingTests.testDistributionSurvivesRestart",
+                second.distributionId == first.distributionId
+                    && freshSubmitter.requests.isEmpty,
+                "requests=\(freshSubmitter.requests.count)"
+            )
+        } catch {
+            check("MessagingTests.testDistributionSurvivesRestart", false, "\(error)")
         }
 
         // GroupChange bytes are untrusted: the sighting carries master key
         // + revision only, never roster deltas — even for a well-formed
         // change wrapper adding a member.
-        do {
-            let membership = GroupStateService.membership(
-                masterKey: Data(repeating: 0x07, count: 32),
-                revision: 5
-            )
-            check(
-                "MessagingTests.testGroupChangeWrapperDecodes",
-                membership?.added.isEmpty == true
-                    && membership?.removed.isEmpty == true
-                    && membership?.revision == 5,
-                "\(String(describing: membership))"
-            )
-        } catch {
-            check("MessagingTests.testGroupChangeWrapperDecodes", false, "\(error)")
-        }
+        let membership = GroupStateService.membership(
+            masterKey: Data(repeating: 0x07, count: 32),
+            revision: 5
+        )
+        check(
+            "MessagingTests.testGroupChangeWrapperDecodes",
+            membership?.added.isEmpty == true
+                && membership?.removed.isEmpty == true
+                && membership?.revision == 5,
+            "\(String(describing: membership))"
+        )
 
         // Credential-list shape: the chat socket's group-credential JSON
         // parses to dated credential entries plus our PNI.
@@ -522,7 +887,7 @@ func runGroupTests() async {
             let applied = try manager.mergeFetchedGroup(
                 masterKey: fetchKey, revision: fetched.revision, members: fetched.members
             )
-            let conversations = ConversationStore(queue: db.queue)
+            let conversations = ConversationStore(queue: rig.alice.db.queue)
             // The thread exists before any send (the message layer made
             // it); titles attach to it, never create it.
             _ = try conversations.conversation(forGroup: fetchKey)
@@ -565,7 +930,7 @@ func runGroupTests() async {
                 check("MessagingTests.testGroupFetchForbiddenKeepsRoster", false, "no error thrown")
             } catch GroupFetchError.transferFailed(status: 403) {
                 let stored = try groups.load(masterKey: forbiddenKey)
-                let conversations = ConversationStore(queue: db.queue)
+                let conversations = ConversationStore(queue: rig.alice.db.queue)
                 let thread = try conversations.conversation(forGroup: forbiddenKey)
                 check(
                     "MessagingTests.testGroupFetchForbiddenKeepsRoster",
@@ -618,7 +983,7 @@ func runGroupTests() async {
             try manager.joinKnownGroup(
                 masterKey: staleKey, revision: 10, members: [groupAlice.lowercased()]
             )
-            let conversations = ConversationStore(queue: db.queue)
+            let conversations = ConversationStore(queue: rig.alice.db.queue)
             _ = try conversations.conversation(forGroup: staleKey)
             try conversations.setGroupTitle(masterKey: staleKey, title: "Current")
             let stale = FetchedGroupState(
@@ -643,21 +1008,17 @@ func runGroupTests() async {
 
         // Embedded server public params parse (pins the per-environment
         // constants against libsignal, TrustRoots-style).
-        do {
-            var ok = true
-            for environment in [AppEnvironment.staging, AppEnvironment.production] as [AppEnvironment] {
-                guard
-                    let raw = Data(base64Encoded: GroupStateFetch.serverPublicParamsBase64(environment: environment)),
-                    (try? ServerPublicParams(contents: raw)) != nil
-                else {
-                    ok = false
-                    break
-                }
+        var paramsOk = true
+        for environment in [AppEnvironment.staging, AppEnvironment.production] as [AppEnvironment] {
+            guard
+                let raw = Data(base64Encoded: GroupStateFetch.serverPublicParamsBase64(environment: environment)),
+                (try? ServerPublicParams(contents: raw)) != nil
+            else {
+                paramsOk = false
+                break
             }
-            check("MessagingTests.testServerPublicParamsParse", ok)
-        } catch {
-            check("MessagingTests.testServerPublicParamsParse", false, "\(error)")
         }
+        check("MessagingTests.testServerPublicParamsParse", paramsOk)
     } catch {
         check("MessagingTests.testGroupSend", false, "\(error)")
     }

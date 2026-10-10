@@ -802,7 +802,9 @@ public final class AppState: ObservableObject {
             ourAddress: ourAddress,
             certs: certs,
             sessions: groupSessions,
-            sender: live
+            sender: live,
+            outbox: sender,
+            senderKeys: SenderKeyInfoTable(queue: database.queue)
         )
         stack = LiveStack(
             database: database,

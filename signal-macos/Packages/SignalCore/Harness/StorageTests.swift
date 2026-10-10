@@ -18,7 +18,7 @@ func runStorageTests() async {
         let back = try await db.keyValue.get("k")
         check(
             "StorageTests.testMemoryRoundTrip",
-            back == Data("value".utf8) && MigrationChain.currentVersion == 10
+            back == Data("value".utf8) && MigrationChain.currentVersion == 11
         )
     } catch {
         check("StorageTests.testMemoryRoundTrip", false, "\(error)")
@@ -220,6 +220,50 @@ func runV9ToV10MigrationTests() {
         )
     } catch {
         check("StorageTests.testV9ToV10Migration", false, "\(error)")
+    }
+}
+
+// v10 -> v11: the sender_key_info table appears (empty); group rows keep
+// members, revision, epoch and refresh flag; the sender_epoch column stays
+// in place (SQLite column drops are not worth a table rebuild).
+func runV10ToV11MigrationTests() {
+    do {
+        let queue = try DatabaseQueue()
+        try MigrationChain.migrate(queue, through: "v10-group-refresh")
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO group_state (master_key, revision, members_json, sender_epoch, needs_refresh)
+                VALUES (x'010203', 4, '["alice","bob"]', 1, 1)
+                """)
+        }
+        try MigrationChain.migrate(queue)
+        let groups = GroupStateTable(queue: queue)
+        let state = try groups.load(masterKey: Data([0x01, 0x02, 0x03]))
+        let infos = SenderKeyInfoTable(queue: queue)
+        let info = try infos.load(masterKey: Data([0x01, 0x02, 0x03]))
+        let count: Int = try queue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sender_key_info") ?? -1
+        }
+        try checkT(
+            "StorageTests.testV10ToV11Migration",
+            state?.revision == 4
+                && state?.members == ["alice", "bob"]
+                && state?.senderEpoch == 1
+                && state?.needsRefresh == true
+                && info == nil
+                && count == 0,
+            "state=\(String(describing: state)) count=\(count)"
+        )
+        // The new table round-trips: reset creates, load reads back.
+        let created = try infos.reset(masterKey: Data([0x01, 0x02, 0x03]))
+        let back = try infos.load(masterKey: Data([0x01, 0x02, 0x03]))
+        try checkT(
+            "StorageTests.testSenderKeyInfoRoundTrip",
+            back == created && back?.memberDevices.isEmpty == true,
+            "back=\(String(describing: back))"
+        )
+    } catch {
+        check("StorageTests.testV10ToV11Migration", false, "\(error)")
     }
 }
 
