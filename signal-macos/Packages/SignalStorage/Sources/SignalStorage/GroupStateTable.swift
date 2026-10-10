@@ -6,7 +6,8 @@ import GRDB
 
 public struct StoredGroupState: Sendable, Equatable {
     public let masterKey: Data
-    /// Last APPLIED SERVER revision. Message sightings never write it.
+    /// Last APPLIED SERVER revision (0 when `hasServerState` is false).
+    /// Message sightings never write it.
     public let revision: UInt32
     public let members: [String]
     /// Our sender-key rotation counter: bumped on member removal so the
@@ -15,13 +16,25 @@ public struct StoredGroupState: Sendable, Equatable {
     /// A message sighting arrived for this group; the roster needs a
     /// server refresh before it can be trusted.
     public let needsRefresh: Bool
+    /// False for placeholder rows a message sighting created: no server
+    /// state has been applied yet, so ANY fetched revision (including 0,
+    /// a freshly created group) applies.
+    public let hasServerState: Bool
 
-    public init(masterKey: Data, revision: UInt32, members: [String], senderEpoch: UInt32 = 0, needsRefresh: Bool = false) {
+    public init(
+        masterKey: Data,
+        revision: UInt32,
+        members: [String],
+        senderEpoch: UInt32 = 0,
+        needsRefresh: Bool = false,
+        hasServerState: Bool = true
+    ) {
         self.masterKey = masterKey
         self.revision = revision
         self.members = members
         self.senderEpoch = senderEpoch
         self.needsRefresh = needsRefresh
+        self.hasServerState = hasServerState
     }
 }
 
@@ -58,10 +71,18 @@ public final class GroupStateTable: Sendable {
         try queue.write { db in
             try db.execute(
                 sql: """
-                    INSERT OR REPLACE INTO group_state (master_key, revision, members_json, sender_epoch, needs_refresh)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO group_state
+                        (master_key, revision, members_json, sender_epoch, needs_refresh, server_revision)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                arguments: [state.masterKey, Int64(state.revision), members, Int64(state.senderEpoch), state.needsRefresh ? 1 : 0]
+                arguments: [
+                    state.masterKey,
+                    Int64(state.revision),
+                    members,
+                    Int64(state.senderEpoch),
+                    state.needsRefresh ? 1 : 0,
+                    state.hasServerState ? Int64(state.revision) : nil,
+                ]
             )
         }
     }
@@ -73,6 +94,7 @@ public final class GroupStateTable: Sendable {
             let membersJson: String
             let senderEpoch: Int64?
             let needsRefresh: Int64?
+            let serverRevision: Int64?
 
             init(row: Row) {
                 masterKey = row["master_key"]
@@ -80,13 +102,17 @@ public final class GroupStateTable: Sendable {
                 membersJson = row["members_json"]
                 senderEpoch = row["sender_epoch"]
                 needsRefresh = row["needs_refresh"]
+                serverRevision = row["server_revision"]
             }
         }
         guard
             let row = try queue.read({ db in
                 try GroupRow.fetchOne(
                     db,
-                    sql: "SELECT master_key, revision, members_json, sender_epoch, needs_refresh FROM group_state WHERE master_key = ?",
+                    sql: """
+                        SELECT master_key, revision, members_json, sender_epoch, needs_refresh, server_revision
+                        FROM group_state WHERE master_key = ?
+                        """,
                     arguments: [masterKey]
                 )
             })
@@ -104,7 +130,8 @@ public final class GroupStateTable: Sendable {
             revision: UInt32(row.revision),
             members: members,
             senderEpoch: row.senderEpoch.map { UInt32(truncatingIfNeeded: $0) } ?? 0,
-            needsRefresh: (row.needsRefresh ?? 0) != 0
+            needsRefresh: (row.needsRefresh ?? 0) != 0,
+            hasServerState: row.serverRevision != nil
         )
     }
 
@@ -127,27 +154,34 @@ public final class GroupStateTable: Sendable {
     }
 
     /// Server write: applies fetched state gated on the last applied SERVER
-    /// revision only (message-claimed revisions never block it). Preserves
-    /// the sender epoch; clears the refresh flag. Returns whether it
-    /// applied.
+    /// revision only (message-claimed revisions never block it; a row with
+    /// no server state yet accepts any revision, including 0). A fetch at or
+    /// below the held server revision applies nothing but still clears the
+    /// refresh flag: the server has confirmed there is nothing newer, so the
+    /// sighting that flagged it was stale or forged. Preserves the sender
+    /// epoch. Returns whether it applied.
     @discardableResult
     public func applyFetchedState(masterKey: Data, revision: UInt32, members: [String]) throws -> Bool {
         struct RevisionRow: FetchableRecord {
-            let revision: Int64
+            let serverRevision: Int64?
             let senderEpoch: Int64?
 
             init(row: Row) {
-                revision = row["revision"]
+                serverRevision = row["server_revision"]
                 senderEpoch = row["sender_epoch"]
             }
         }
         return try queue.write { db -> Bool in
             let existing = try RevisionRow.fetchOne(
                 db,
-                sql: "SELECT revision, sender_epoch FROM group_state WHERE master_key = ?",
+                sql: "SELECT server_revision, sender_epoch FROM group_state WHERE master_key = ?",
                 arguments: [masterKey]
             )
-            if let existing, existing.revision >= Int64(revision) {
+            if let held = existing?.serverRevision, held >= Int64(revision) {
+                try db.execute(
+                    sql: "UPDATE group_state SET needs_refresh = 0 WHERE master_key = ?",
+                    arguments: [masterKey]
+                )
                 return false
             }
             let membersJson = String(
@@ -156,10 +190,12 @@ public final class GroupStateTable: Sendable {
             ) ?? "[]"
             try db.execute(
                 sql: """
-                    INSERT INTO group_state (master_key, revision, members_json, sender_epoch, needs_refresh)
-                    VALUES (?, ?, ?, ?, 0)
+                    INSERT INTO group_state
+                        (master_key, revision, members_json, sender_epoch, needs_refresh, server_revision)
+                    VALUES (?, ?, ?, ?, 0, ?)
                     ON CONFLICT(master_key) DO UPDATE SET
                         revision = excluded.revision,
+                        server_revision = excluded.server_revision,
                         members_json = excluded.members_json,
                         needs_refresh = 0
                     """,
@@ -168,6 +204,7 @@ public final class GroupStateTable: Sendable {
                     Int64(revision),
                     membersJson,
                     existing?.senderEpoch ?? 0,
+                    Int64(revision),
                 ]
             )
             return true

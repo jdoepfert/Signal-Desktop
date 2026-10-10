@@ -117,7 +117,7 @@
 
 **Files:**
 - Modify: `Packages/SignalMessaging/Sources/SignalMessaging/GroupStateFetch.swift`: `FetchedGroupState.announcementsOnly: Bool`, `ourRoleIsAdmin: Bool`. Our role comes from our decrypted member entry.
-- Modify: `Packages/SignalStorage/...` (persist both with the roster; migration number = next free after the B interop plan's v14 and any C1/C2 migrations already landed; check `MigrationChain.currentVersion`)
+- Modify: `Packages/SignalStorage/...` (persist both with the roster; migration number = next free after the B interop plan's v15 and any C1/C2 migrations already landed; check `MigrationChain.currentVersion`)
 - Modify: `Packages/SignalMessaging/Sources/SignalMessaging/GroupManager.swift`: `sendTextToGroup` throws `GroupSendError.announcementsOnly` for non-admins.
 - Modify: `Packages/SignalApp/Sources/SignalApp/ComposerView.swift` / `AppState.swift`: the composer is disabled with an explanation (string in the app's existing English-copy pattern).
 - Test: `Packages/SignalCore/Harness/GroupTests.swift`

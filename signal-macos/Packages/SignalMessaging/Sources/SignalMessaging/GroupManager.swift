@@ -162,10 +162,10 @@ public final class GroupManager: @unchecked Sendable {
         let roster = Set(state.members.map { $0.lowercased() })
         // Load-or-create our sender-key info.
         var info = try senderKeys.load(masterKey: masterKey)
-            ?? senderKeys.reset(masterKey: masterKey)
+            ?? senderKeys.reset(masterKey: masterKey, ourAddress: ourAddress)
         // Step 1: an expired key resets.
         if Int64(Self.nowMs()) - info.createdAtMs > Self.maxSenderKeyAgeMs {
-            info = try senderKeys.reset(masterKey: masterKey)
+            info = try senderKeys.reset(masterKey: masterKey, ourAddress: ourAddress)
         }
         // Steps 6–7: the current device partition.
         var current = [(aci: String, deviceId: UInt32, registrationId: UInt32)]()
@@ -186,7 +186,7 @@ public final class GroupManager: @unchecked Sendable {
             !roster.contains(Self.aci(of: $0))
         }
         if accountGone {
-            info = try senderKeys.reset(masterKey: masterKey)
+            info = try senderKeys.reset(masterKey: masterKey, ourAddress: ourAddress)
         }
         // Step 9: SKDMs to newly added devices only, then persist.
         let freshAcis = Set(

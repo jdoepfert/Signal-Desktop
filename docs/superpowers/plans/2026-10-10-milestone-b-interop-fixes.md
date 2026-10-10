@@ -78,7 +78,7 @@
 
 **Files:**
 - Modify: `Packages/SignalStorage/Sources/SignalStorage/MessageStore.swift` (`applyMembership` → record "needs refresh" only)
-- Modify: `Packages/SignalStorage/Sources/SignalStorage/GroupStateTable.swift` (separate `serverRevision` from a `seenRevision` hint, or a `needs_refresh` flag; implementer picks, migration `v10-group-refresh`; Task 3 adds `v11`, Task 4 adds `v12`)
+- Modify: `Packages/SignalStorage/Sources/SignalStorage/GroupStateTable.swift` (separate `serverRevision` from a `seenRevision` hint, or a `needs_refresh` flag; implementer picks, migration `v10-group-refresh`; Task 3 adds `v11`, the Task 2 review fix adds `v12`, Task 4 adds `v13`)
 - Modify: `Packages/SignalStorage/Sources/SignalStorage/Schema.swift`
 - Modify: `Packages/SignalCore/Sources/SignalCore/GroupStateService.swift` (stop deriving `added`/`removed` from messages; keep only `masterKey` + `revision`)
 - Modify: `Packages/SignalMessaging/Sources/SignalMessaging/GroupManager.swift` (`mergeFetchedGroup` compares against the last *server* revision only)
@@ -138,7 +138,7 @@ It resets the key when a member is removed or the key is older than the expire d
 
 **Files:**
 - Modify: `Packages/SignalMessaging/Sources/SignalMessaging/GroupStateFetch.swift`: `FetchedGroupState` gains `endorsementsResponse: Data?`.
-- Modify: `Packages/SignalStorage/Sources/SignalStorage/Schema.swift`: migration `v12-group-send-endorsements` adds a `group_send_endorsements` table (`master_key`, `expiration`, `combined BLOB`, `member_aci TEXT`, `endorsement BLOB`; one row per member plus a combined row, or two tables; the implementer picks).
+- Modify: `Packages/SignalStorage/Sources/SignalStorage/Schema.swift`: migration `v13-group-send-endorsements` adds a `group_send_endorsements` table (`master_key`, `expiration`, `combined BLOB`, `member_aci TEXT`, `endorsement BLOB`; one row per member plus a combined row, or two tables; the implementer picks).
 - Create: `Packages/SignalMessaging/Sources/SignalMessaging/GroupSendEndorsementState.swift`: a port of Desktop's class (`groupSendEndorsements.preload.ts:157+`).
 - Modify: `Packages/SignalMessaging/Sources/SignalMessaging/GroupManager.swift`: `applyFetchedState` stores endorsements in the same transaction as the roster.
 - Modify: `Packages/SignalCore/Harness/GroupTests.swift`
@@ -152,7 +152,7 @@ It resets the key when a member is removed or the key is older than the expire d
   - `testEndorsementExpiryWindow`: expiration now+1 h → `isValid` false; now+3 h → true.
   - `testTokenCoversExactlySenderKeyRecipients`: a token built for `{A, C}` out of `{me, A, B, C}` verifies server-side (libsignal `GroupSendFullToken.verify` with the test server params) for exactly `{A, C}`.
   - `testStaleFetchKeepsEndorsements`: a fetch rejected by the revision gate leaves the endorsements untouched.
-  - `testV11ToV12Migration`.
+  - `testV12ToV13Migration`.
 - [ ] **Step 2: Run, confirm they fail.**
 - [ ] **Step 3: Implement.** Decode with `GroupSendEndorsementsResponse(contents:).receive(groupMembers:localUser:groupParams:serverParams:)`, using server params from `GroupStateFetch.serverPublicParamsBase64`. Never log endorsement bytes.
 - [ ] **Step 4: Run, confirm the full harness passes.**
@@ -359,7 +359,7 @@ Algorithm (Desktop `sendToGroupViaSenderKey`, keep the step comments in the code
 - applies `getValidMessageAttachments` (`Attachment.std.ts:916`): visual media keeps the leading run of images and videos, anything else keeps only the first.
 
 **Files:**
-- Modify: `Packages/SignalStorage/Sources/SignalStorage/Schema.swift`. Migration `v13-message-attachments` adds `message_attachments(message_id INTEGER NOT NULL, position INTEGER NOT NULL, digest BLOB NOT NULL, is_body INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(message_id, position))` and backfills position 0 from `messages.attachment_digest`. Keep that column as "first attachment" for existing readers.
+- Modify: `Packages/SignalStorage/Sources/SignalStorage/Schema.swift`. Migration `v14-message-attachments` adds `message_attachments(message_id INTEGER NOT NULL, position INTEGER NOT NULL, digest BLOB NOT NULL, is_body INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(message_id, position))` and backfills position 0 from `messages.attachment_digest`. Keep that column as "first attachment" for existing readers.
 - Modify: `Packages/SignalStorage/Sources/SignalStorage/MessageStore.swift`: `NewMessage.attachments: [NewAttachment]` plus `bodyAttachment: NewAttachment?`, persisted in the same transaction; `attachment` stays as a computed `first` for source compatibility.
 - Modify: `Packages/SignalCore/Sources/SignalCore/ContentMapping.swift`: map all pointers through Desktop's three rules. The body attachment is stored with `is_body = 1` and is never shown as a file; rendering its text is B2 Task 1.
 - Modify: `Packages/SignalApp/Sources/SignalApp/ConversationViewModel.swift` and `ThreadView.swift`: `ThreadMessage.attachments: [ThreadAttachment]`, a simple vertical stack (no album grid in this task).
@@ -376,7 +376,7 @@ Algorithm (Desktop `sendToGroupViaSenderKey`, keep the step comments in the code
   - `testNonVisualKeepsFirstOnly`: [pdf, img] → 1.
   - `testLongTextAttachmentPartitioned`: [text/x-signal-plain, img] → 1 normal attachment plus a body digest, and no file row.
   - `testSentSyncAlbum`: the same mapping applies through `SyncMessage.Sent`.
-  - `testV12ToV13Migration`: existing single-attachment rows backfill position 0.
+  - `testV13ToV14Migration`: existing single-attachment rows backfill position 0.
 - [ ] **Step 2: Run, confirm they fail.**
 - [ ] **Step 3: Implement.** Sending stays single-file; multi-select send is in the B2 plan.
 - [ ] **Step 4: Run, confirm the full harness passes, and `Tools/build-app.sh`.**
@@ -412,7 +412,7 @@ Algorithm (Desktop `sendToGroupViaSenderKey`, keep the step comments in the code
 On receive (`processDataMessage.preload.ts:83-131`), Desktop reads `fileName` and drops an `uploadTimestamp` more than 12 h in the future.
 
 **Files:**
-- Modify: `Packages/SignalStorage/Sources/SignalStorage/Schema.swift`: migration `v14-attachment-names` adds `file_name TEXT` and `upload_timestamp INTEGER` to `attachments`.
+- Modify: `Packages/SignalStorage/Sources/SignalStorage/Schema.swift`: migration `v15-attachment-names` adds `file_name TEXT` and `upload_timestamp INTEGER` to `attachments`.
 - Modify: `AttachmentTable.swift`, `MessageStore.swift` (`NewAttachment.fileName: String?`, `uploadTimestamp: UInt64?`), `AttachmentService.swift` (`upload` records `uploadTimestamp = now`), `OutgoingSender.swift` (`attachmentProto` sets both, stripping `fileName` for `image/*` and `video/*`), `ContentMapping.swift` (inbound, with the 12 h future check), `AppState.swift` (`attachFile` passes the picked file's name; resend reuses stored values), `ThreadView.swift` (file rows show the name).
 - Test: `AttachmentTests.swift`, `ReceiveTests.swift`, `StorageTests.swift`
 
@@ -423,7 +423,7 @@ On receive (`processDataMessage.preload.ts:83-131`), Desktop reads `fileName` an
   - `testInboundFileNameStored`.
   - `testFutureUploadTimestampDropped`.
   - `testResendKeepsFileName` (on top of Task 8).
-  - `testV13ToV14Migration`.
+  - `testV14ToV15Migration`.
 - [ ] **Step 2: Run, confirm they fail.**
 - [ ] **Step 3: Implement.** File names are user data and are never logged.
 - [ ] **Step 4: Run, confirm the full harness passes.**
@@ -494,6 +494,6 @@ Parity items P3, P6, P7, P9, P10 and P11 from the same review are in `2026-10-10
 
 1. **Coverage:** findings 1–7 and parity items P1, P2, P4, P5, P8 each map to a task (table above); live evidence comes only from Task 17.
 2. **Oracle pins:** every wire change names a Desktop file and line range; TUS header names and metadata encoding are copied from `tusProtocol.node.ts`, not paraphrased.
-3. **Ordering:** Task 1 creates `PhoneEnvelopes`, which Tasks 3–6 use. Task 2 (server roster) precedes Tasks 3–5 because sender-key resets and endorsements both key off server state. Task 8 creates `attachmentProto`, which C1 Task 3 extends. Task 10 creates the cache and queue that C1 Task 4 and C2 Tasks 2–5 consume. Task 11's `ImagePrep` is the image path C2 Task 3 extends. Tasks 12 and 14 add migrations v13 and v14; C2 starts at v15.
+3. **Ordering:** Task 1 creates `PhoneEnvelopes`, which Tasks 3–6 use. Task 2 (server roster) precedes Tasks 3–5 because sender-key resets and endorsements both key off server state. Task 8 creates `attachmentProto`, which C1 Task 3 extends. Task 10 creates the cache and queue that C1 Task 4 and C2 Tasks 2–5 consume. Task 11's `ImagePrep` is the image path C2 Task 3 extends. Migrations: v10 (Task 2), v11 (Task 3), v12 (Task 2 review fix: `server_revision`), v13 (Task 4), v14 (Task 12), v15 (Task 14); C2 starts at v16.
 5. **Desktop parity for group send:** Tasks 3–5 port `sendContentMessageToGroup` / `sendToGroupViaSenderKey` step for step. The only deliberate omissions (stories, `sendMultiLegacy`) are listed in Global Constraints.
 4. **Test honesty:** Review Focus lines all have owning tests; Task 9 Step 1 re-audits that "phone" fixtures are Desktop-shaped.

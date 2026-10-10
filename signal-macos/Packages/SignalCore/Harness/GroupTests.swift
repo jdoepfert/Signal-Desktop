@@ -293,7 +293,41 @@ private func makeBobManager(
     )
 }
 
+/// The chain id our current sender key would distribute (an SKDM built
+/// from the stored record; building one does not change the record).
+private func ourChainId(_ rig: GroupRig, _ distributionId: UUID) throws -> UInt32 {
+    try SenderKeyDistributionMessage(
+        from: rig.alice.address,
+        distributionId: distributionId,
+        store: rig.alice.store,
+        context: NullContext()
+    ).chainId
+}
+
 func runGroupTests() async {
+    // Background refresh failures back off (1 min, 5 min, 30 min, capped)
+    // instead of refetching on every incoming message; success resets.
+    do {
+        var backoff = GroupRefreshBackoff()
+        let key = Data([0x01])
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        let first = backoff.mayAttempt(key, now: t0)
+        backoff.recordFailure(key, now: t0)
+        let blocked = !backoff.mayAttempt(key, now: t0.addingTimeInterval(59))
+        let after1 = backoff.mayAttempt(key, now: t0.addingTimeInterval(61))
+        backoff.recordFailure(key, now: t0.addingTimeInterval(61))
+        let blocked2 = !backoff.mayAttempt(key, now: t0.addingTimeInterval(61 + 299))
+        backoff.recordFailure(key, now: t0.addingTimeInterval(400))
+        backoff.recordFailure(key, now: t0.addingTimeInterval(400))
+        let capped = backoff.mayAttempt(key, now: t0.addingTimeInterval(400 + 1801))
+        backoff.recordSuccess(key)
+        let reset = backoff.mayAttempt(key, now: t0.addingTimeInterval(401))
+        check(
+            "GroupTests.testRefreshBackoff",
+            first && blocked && after1 && blocked2 && capped && reset
+        )
+    }
+
     do {
         let context = NullContext()
         let bobStore = InMemorySignalProtocolStore()
@@ -701,6 +735,7 @@ func runGroupTests() async {
                 members: [groupAlice, groupBob, groupCarol]
             )
             let first = try await manager.prepareSenderKey(group: key)
+            let chainBefore = try ourChainId(rig, first.distributionId)
             try manager.joinKnownGroup(
                 masterKey: key, revision: 2, members: [groupAlice, groupCarol]
             )
@@ -708,9 +743,12 @@ func runGroupTests() async {
             let second = try await manager.prepareSenderKey(group: key)
             let fresh = rig.submitter.requests.dropFirst(before)
             let info = try senderKeys.load(masterKey: key)
+            // Desktop's reset: same distribution id, our old record deleted,
+            // so the new SKDM carries a NEW chain.
             try checkT(
                 "MessagingTests.testRemovalResetsSenderKey",
-                second.distributionId != first.distributionId
+                second.distributionId == first.distributionId
+                    && (try ourChainId(rig, second.distributionId)) != chainBefore
                     && fresh.count == 1
                     && fresh.first?.destination == groupCarol.lowercased()
                     && info?.distributionId == second.distributionId
@@ -731,6 +769,7 @@ func runGroupTests() async {
                 masterKey: key, revision: 1, members: [groupAlice, groupBob]
             )
             let first = try await manager.prepareSenderKey(group: key)
+            let chainBefore = try ourChainId(rig, first.distributionId)
             let agedMs = Int64(Date().timeIntervalSince1970 * 1000)
                 - 91 * 24 * 60 * 60 * 1000
             try senderKeys.save(StoredSenderKeyInfo(
@@ -745,7 +784,8 @@ func runGroupTests() async {
             let info = try senderKeys.load(masterKey: key)
             try checkT(
                 "MessagingTests.testSenderKeyExpiryResets",
-                second.distributionId != first.distributionId
+                second.distributionId == first.distributionId
+                    && (try ourChainId(rig, second.distributionId)) != chainBefore
                     && fresh.count == 1
                     && fresh.first?.destination == groupBob.lowercased()
                     && info?.distributionId == second.distributionId

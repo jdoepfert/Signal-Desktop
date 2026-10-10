@@ -99,6 +99,9 @@ public final class AppState: ObservableObject {
     /// Groups with a server refresh in flight (drain below never runs two
     /// for the same group).
     private var groupRefreshInflight: Set<Data> = []
+    /// Failed background refreshes wait before retrying (never on every
+    /// incoming message).
+    private var groupRefreshBackoff = GroupRefreshBackoff()
     private static let logger = Logger(subsystem: "app", category: "lifecycle")
 
     /// Alert policy for inbound messages; `locked` flips to title-only
@@ -442,11 +445,17 @@ public final class AppState: ObservableObject {
         guard let pending = try? stack.groups.groupsNeedingRefresh() else {
             return
         }
-        for masterKey in pending where !groupRefreshInflight.contains(masterKey) {
+        for masterKey in pending
+        where !groupRefreshInflight.contains(masterKey) && groupRefreshBackoff.mayAttempt(masterKey) {
             groupRefreshInflight.insert(masterKey)
             Task {
                 let ok = await self.refreshGroupFromServer(masterKey: masterKey, quiet: true)
                 self.groupRefreshInflight.remove(masterKey)
+                if ok {
+                    self.groupRefreshBackoff.recordSuccess(masterKey)
+                } else {
+                    self.groupRefreshBackoff.recordFailure(masterKey)
+                }
                 if ok {
                     self.refreshConversations()
                     await self.reloadThread()

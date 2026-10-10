@@ -3,6 +3,7 @@
 
 import Foundation
 import GRDB
+import LibSignalClient
 import SignalStorage
 
 private func tempDBPath() -> String {
@@ -18,7 +19,7 @@ func runStorageTests() async {
         let back = try await db.keyValue.get("k")
         check(
             "StorageTests.testMemoryRoundTrip",
-            back == Data("value".utf8) && MigrationChain.currentVersion == 11
+            back == Data("value".utf8) && MigrationChain.currentVersion == 12
         )
     } catch {
         check("StorageTests.testMemoryRoundTrip", false, "\(error)")
@@ -207,15 +208,15 @@ func runV9ToV10MigrationTests() {
                 VALUES (x'010203', 9, '["alice","bob"]', 1)
                 """)
         }
-        try MigrationChain.migrate(queue)
-        let table = GroupStateTable(queue: queue)
-        let state = try table.load(masterKey: Data([0x01, 0x02, 0x03]))
+        try MigrationChain.migrate(queue, through: "v10-group-refresh")
+        // Raw read: GroupStateTable expects the v12 columns.
+        let state = try rawGroupRow(queue)
         try checkT(
             "StorageTests.testV9ToV10Migration",
             state?.revision == 0
-                && state?.members == ["alice", "bob"]
-                && state?.senderEpoch == 1
-                && (try table.groupsNeedingRefresh()) == [Data([0x01, 0x02, 0x03])],
+                && state?.members == "[\"alice\",\"bob\"]"
+                && state?.epoch == 1
+                && state?.needsRefresh == 1,
             "state=\(String(describing: state))"
         )
     } catch {
@@ -236,9 +237,9 @@ func runV10ToV11MigrationTests() {
                 VALUES (x'010203', 4, '["alice","bob"]', 1, 1)
                 """)
         }
-        try MigrationChain.migrate(queue)
-        let groups = GroupStateTable(queue: queue)
-        let state = try groups.load(masterKey: Data([0x01, 0x02, 0x03]))
+        try MigrationChain.migrate(queue, through: "v11-sender-key-info")
+        // Raw read: GroupStateTable expects the v12 columns.
+        let state = try rawGroupRow(queue)
         let infos = SenderKeyInfoTable(queue: queue)
         let info = try infos.load(masterKey: Data([0x01, 0x02, 0x03]))
         let count: Int = try queue.read { db in
@@ -247,15 +248,18 @@ func runV10ToV11MigrationTests() {
         try checkT(
             "StorageTests.testV10ToV11Migration",
             state?.revision == 4
-                && state?.members == ["alice", "bob"]
-                && state?.senderEpoch == 1
-                && state?.needsRefresh == true
+                && state?.members == "[\"alice\",\"bob\"]"
+                && state?.epoch == 1
+                && state?.needsRefresh == 1
                 && info == nil
                 && count == 0,
             "state=\(String(describing: state)) count=\(count)"
         )
         // The new table round-trips: reset creates, load reads back.
-        let created = try infos.reset(masterKey: Data([0x01, 0x02, 0x03]))
+        let created = try infos.reset(
+            masterKey: Data([0x01, 0x02, 0x03]),
+            ourAddress: try ProtocolAddress(name: "aaaaaaaa-1111-4222-8333-444444444444", deviceId: 1)
+        )
         let back = try infos.load(masterKey: Data([0x01, 0x02, 0x03]))
         try checkT(
             "StorageTests.testSenderKeyInfoRoundTrip",
@@ -264,6 +268,55 @@ func runV10ToV11MigrationTests() {
         )
     } catch {
         check("StorageTests.testV10ToV11Migration", false, "\(error)")
+    }
+}
+
+// v11 -> v12: every stored roster is untrusted (message-derived or from a
+// revision the v10 reset blanked), so rows lose their members, hold no
+// server revision, and are flagged; epoch and sender-key info survive.
+/// The x'010203' group row read with plain SQL, for migration tests that
+/// stop before the columns `GroupStateTable` reads exist.
+private func rawGroupRow(
+    _ queue: DatabaseQueue
+) throws -> (revision: Int, members: String, epoch: Int, needsRefresh: Int)? {
+    try queue.read { db in
+        guard let row = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT revision, members_json, sender_epoch, needs_refresh
+                FROM group_state WHERE master_key = x'010203'
+                """
+        ) else {
+            return nil
+        }
+        return (row["revision"], row["members_json"], row["sender_epoch"], row["needs_refresh"])
+    }
+}
+
+func runV11ToV12MigrationTests() {
+    do {
+        let queue = try DatabaseQueue()
+        try MigrationChain.migrate(queue, through: "v11-sender-key-info")
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO group_state (master_key, revision, members_json, sender_epoch, needs_refresh)
+                VALUES (x'010203', 4, '["alice","bob"]', 1, 0)
+                """)
+        }
+        try MigrationChain.migrate(queue)
+        let table = GroupStateTable(queue: queue)
+        let state = try table.load(masterKey: Data([0x01, 0x02, 0x03]))
+        try checkT(
+            "StorageTests.testV11ToV12Migration",
+            state?.hasServerState == false
+                && state?.members == []
+                && state?.senderEpoch == 1
+                && state?.needsRefresh == true
+                && MigrationChain.currentVersion == 12,
+            "state=\(String(describing: state))"
+        )
+    } catch {
+        check("StorageTests.testV11ToV12Migration", false, "\(error)")
     }
 }
 

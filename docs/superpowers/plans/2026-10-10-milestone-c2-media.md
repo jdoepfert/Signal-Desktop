@@ -86,18 +86,18 @@ git add signal-macos/Tools/media-spike/README.md
 git commit -m "signal-macos: prove media path on macOS (thumbnails, video, sanitize)"
 ```
 
-### Task 1: BlurHash codec and wire metadata (v15 migration)
+### Task 1: BlurHash codec and wire metadata (v16 migration)
 
 **Files:**
 - Create: `signal-macos/Packages/SignalCore/Sources/SignalCore/BlurHash.swift`: pure-Swift `encode(rgba:width:height:componentsX:componentsY:) -> String` and `decode(_:width:height:punch:) -> [UInt8]?` (RGBA), ported from `blurhash@2.0.5`.
 - Modify: `signal-macos/Tools/vectors/generate.mjs`: emit `Packages/SignalCore/Harness/Vectors/blurhash.json` (inputs plus expected encode strings and decode pixels from the npm package).
-- Modify: `signal-macos/Packages/SignalStorage/Sources/SignalStorage/Schema.swift`: add migration `v15-media-metadata` after the B interop plan's `v14` (its Tasks 2–4, 12 and 14 add v10–v14). On `attachments` it adds `blur_hash TEXT NOT NULL DEFAULT ''`, `width INTEGER NOT NULL DEFAULT 0`, `height INTEGER NOT NULL DEFAULT 0`, and the local-only `thumbnail BLOB NOT NULL DEFAULT x''`.
+- Modify: `signal-macos/Packages/SignalStorage/Sources/SignalStorage/Schema.swift`: add migration `v16-media-metadata` after the B interop plan's `v15` (its Tasks 2–4, 12 and 14 plus the Task 2 review fix add v10–v15). On `attachments` it adds `blur_hash TEXT NOT NULL DEFAULT ''`, `width INTEGER NOT NULL DEFAULT 0`, `height INTEGER NOT NULL DEFAULT 0`, and the local-only `thumbnail BLOB NOT NULL DEFAULT x''`.
 - Modify: `signal-macos/Packages/SignalStorage/Sources/SignalStorage/AttachmentTable.swift`: `save` and `loadMany` carry the new fields. Add `setLocalThumbnail(digest:jpeg:)`, which writes only the thumbnail.
 - Modify: `signal-macos/Packages/SignalStorage/Sources/SignalStorage/MessageStore.swift`: `NewAttachment` gains defaulted `blurHash: String = ""`, `width: Int = 0` and `height: Int = 0`. The insert upsert writes them and never touches `thumbnail`.
 - Modify: `signal-macos/Packages/SignalMessaging/Sources/SignalMessaging/AttachmentService.swift`: `AttachmentPointer` gains the same three defaulted fields.
 - Modify: `signal-macos/Packages/SignalCore/Sources/SignalCore/ContentMapping.swift`: `attachment(from:)` carries inbound `blurHash`, `width` and `height`, validated.
 - Modify: `signal-macos/Packages/SignalCore/Sources/SignalCore/OutgoingSender.swift`: `attachmentProto` sets `blurHash`, `width` and `height` when non-empty or non-zero. It never sets `thumbnail`.
-- Test: `StorageTests.swift` (`testV14ToV15Migration`, `testMediaMetadataRoundTrip`, `testRedeliveryKeepsLocalThumbnail`), `ReceiveTests.swift` (`testInvalidBlurHashMapsAsMissing`, `testDimensionBounds`), new `MediaTests.swift` (`testBlurHashMatchesNpmVectors`, `testOutgoingPointerHasNoThumbnail`), registered in `main.swift`.
+- Test: `StorageTests.swift` (`testV15ToV16Migration`, `testMediaMetadataRoundTrip`, `testRedeliveryKeepsLocalThumbnail`), `ReceiveTests.swift` (`testInvalidBlurHashMapsAsMissing`, `testDimensionBounds`), new `MediaTests.swift` (`testBlurHashMatchesNpmVectors`, `testOutgoingPointerHasNoThumbnail`), registered in `main.swift`.
 
 **Interfaces:**
 - Consumes: Task 0 (confirmed shapes).
@@ -108,7 +108,7 @@ git commit -m "signal-macos: prove media path on macOS (thumbnails, video, sanit
 ```swift
 // testBlurHashMatchesNpmVectors: for each vector, encode(rgba, w, h, 4, 3)
 // equals the npm string exactly; decode(hash, 32, 32) equals the npm pixels.
-// testV14ToV15Migration: fixture DB at v14 with 1 attachment row → migrate →
+// testV15ToV16Migration: fixture DB at v15 with 1 attachment row → migrate →
 // blur_hash '', width/height 0, thumbnail empty, existing columns intact.
 // testMediaMetadataRoundTrip: save(... blurHash, width: 1024, height: 768)
 // → load → all equal.

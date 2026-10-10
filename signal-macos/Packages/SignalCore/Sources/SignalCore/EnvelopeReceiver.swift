@@ -383,6 +383,9 @@ public actor EnvelopeReceiver {
         let padded: Data
         let senderAci: String
         let senderDevice: UInt32?
+        // Desktop processes an SKDM only from encrypted content
+        // (`MessageReceiver.preload.ts:1513`, `wasEncrypted &&`).
+        var wasEncrypted = true
         switch envelope.type {
         case .doubleRatchet, .prekeyMessage:
             let source = try Self.source(of: envelope)
@@ -450,9 +453,11 @@ public actor EnvelopeReceiver {
                 return try Self.finishGroupContent(content, from: senderAddress, inbound: inbound, store: store)
             }
             padded = result.plaintext
+            wasEncrypted = result.type != .plaintext
         case .plaintextContent:
             // Decryption-error receipts only (never user content).
             padded = try PlaintextContent(bytes: envelope.content).body
+            wasEncrypted = false
             senderAci = envelope.hasSourceServiceID ? envelope.sourceServiceID.lowercased() : ""
             senderDevice = envelope.hasSourceDeviceID ? envelope.sourceDeviceID : nil
         default:
@@ -473,7 +478,8 @@ public actor EnvelopeReceiver {
         } catch {
             throw EnvelopeError.invalidContent
         }
-        if let senderDevice,
+        if wasEncrypted,
+           let senderDevice,
            let address = try? ProtocolAddress(name: senderAci, deviceId: senderDevice)
         {
             try Self.processSkdmField(content, from: address, store: store)

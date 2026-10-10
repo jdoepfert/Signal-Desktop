@@ -48,6 +48,9 @@ func runReceiveTests() async {
     await testMessageCannotRemoveMember()
     await testForgedRevisionDoesNotBlockServerMerge()
     await testFirstSightingFlagsRefresh()
+    await testRevisionZeroGroupApplies()
+    await testSameRevisionSightingDoesNotFlag()
+    await testStaleFetchClearsFlag()
     await testSentSyncFromOtherSenderIgnored()
     await testPaddingFailureKeepsNothingAndDoesNotCrash()
     await testConcurrentDecryptSameSender()
@@ -1798,4 +1801,118 @@ private func testPlaceholderDisplayText() {
             && unsupportedEmpty.displayBody == "Message could not be shown"
             && unsupportedBody.displayBody == "look" && text.displayBody == "hi"
     )
+}
+
+// A group created on the phone is at server revision 0. Its first sighting
+// must not block the revision-0 server state (placeholder rows hold no
+// server revision at all).
+private func testRevisionZeroGroupApplies() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let masterKey = Data(repeating: 0x55, count: 32)
+        let ts: UInt64 = 1_700_000_640_000
+        let receiver = try rig.receiver(trustRoots: [])
+        await receiver.process(AckCounter().envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try groupTextMessage(
+                    masterKey: masterKey,
+                    revision: 0,
+                    body: "new group",
+                    timestamp: ts
+                ),
+                clientTimestamp: ts
+            )
+        ))
+        let table = GroupStateTable(queue: rig.db.queue)
+        let merged = try table.applyFetchedState(
+            masterKey: masterKey,
+            revision: 0,
+            members: [rig.ourAci, peer.aci]
+        )
+        let state = try table.load(masterKey: masterKey)
+        try checkT(
+            "ReceiveTests.testRevisionZeroGroupApplies",
+            merged
+                && Set(state?.members ?? []) == Set([rig.ourAci, peer.aci])
+                && state?.hasServerState == true
+                && !(try table.groupsNeedingRefresh()).contains(masterKey),
+            "merged=\(merged) state=\(String(describing: state))"
+        )
+    } catch {
+        check("ReceiveTests.testRevisionZeroGroupApplies", false, "\(error)")
+    }
+}
+
+// Desktop fetches only when a message claims a revision newer than the
+// one it holds: a sighting at the known server revision flags nothing, a
+// newer one does.
+private func testSameRevisionSightingDoesNotFlag() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let masterKey = Data(repeating: 0x56, count: 32)
+        let ts: UInt64 = 1_700_000_650_000
+        let table = GroupStateTable(queue: rig.db.queue)
+        try table.applyFetchedState(masterKey: masterKey, revision: 5, members: [rig.ourAci, peer.aci])
+        let receiver = try rig.receiver(trustRoots: [])
+        await receiver.process(AckCounter().envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try groupTextMessage(masterKey: masterKey, revision: 5, body: "same", timestamp: ts),
+                clientTimestamp: ts
+            )
+        ))
+        let afterSame = try table.groupsNeedingRefresh().contains(masterKey)
+        await receiver.process(AckCounter().envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try groupTextMessage(masterKey: masterKey, revision: 6, body: "newer", timestamp: ts + 1),
+                clientTimestamp: ts + 1
+            )
+        ))
+        let afterNewer = try table.groupsNeedingRefresh().contains(masterKey)
+        try checkT(
+            "ReceiveTests.testSameRevisionSightingDoesNotFlag",
+            !afterSame && afterNewer,
+            "afterSame=\(afterSame) afterNewer=\(afterNewer)"
+        )
+    } catch {
+        check("ReceiveTests.testSameRevisionSightingDoesNotFlag", false, "\(error)")
+    }
+}
+
+// A forged high revision flags a refresh; when the server answers with the
+// revision we already hold, nothing applies and the flag clears (no fetch
+// storm on every later message).
+private func testStaleFetchClearsFlag() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let masterKey = Data(repeating: 0x57, count: 32)
+        let ts: UInt64 = 1_700_000_660_000
+        let table = GroupStateTable(queue: rig.db.queue)
+        try table.applyFetchedState(masterKey: masterKey, revision: 5, members: [rig.ourAci, peer.aci])
+        let receiver = try rig.receiver(trustRoots: [])
+        await receiver.process(AckCounter().envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try groupTextMessage(masterKey: masterKey, revision: 99, body: "forged", timestamp: ts),
+                clientTimestamp: ts
+            )
+        ))
+        let flagged = try table.groupsNeedingRefresh().contains(masterKey)
+        let merged = try table.applyFetchedState(masterKey: masterKey, revision: 5, members: [rig.ourAci, peer.aci])
+        let state = try table.load(masterKey: masterKey)
+        try checkT(
+            "ReceiveTests.testStaleFetchClearsFlag",
+            flagged && !merged && state?.revision == 5
+                && !(try table.groupsNeedingRefresh()).contains(masterKey),
+            "flagged=\(flagged) merged=\(merged) state=\(String(describing: state))"
+        )
+    } catch {
+        check("ReceiveTests.testStaleFetchClearsFlag", false, "\(error)")
+    }
 }

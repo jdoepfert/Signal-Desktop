@@ -3,6 +3,7 @@
 
 import Foundation
 import GRDB
+import LibSignalClient
 
 /// Our per-group sender-key state, mirroring Desktop's `senderKeyInfo`
 /// (`sendToGroup.preload.ts`): a random distribution id, its creation date
@@ -99,23 +100,40 @@ public final class SenderKeyInfoTable: Sendable {
         }
     }
 
-    /// Rotation: a NEW random UUID with the old chain abandoned and an empty
-    /// device set. This replaces Desktop's "preserve the distribution id
-    /// and delete the sender-key record" reset (`resetSenderKey`): libsignal's
-    /// Swift `SenderKeyStore` has store/load only, no record-delete API, so
-    /// the record cannot be deleted without patching vendored code. Security
-    /// is equivalent — a removed member never receives an SKDM for the new
-    /// id, so it cannot read the new chain — and the abandoned row costs one
-    /// small record per rotation.
+    /// Rotation exactly like Desktop's `resetSenderKey`
+    /// (`sendToGroup.preload.ts:842-870`): keep the existing distribution id
+    /// (a new random one only when the group has none yet), delete OUR
+    /// sender-key record for it, and clear `memberDevices` with a fresh
+    /// creation date. The next SKDM then starts a new chain under the same
+    /// id; a removed member never receives it, so it cannot read the new
+    /// chain. Delete and rewrite run in one transaction.
     @discardableResult
-    public func reset(masterKey: Data) throws -> StoredSenderKeyInfo {
-        let info = StoredSenderKeyInfo(
-            masterKey: masterKey,
-            distributionId: UUID(),
-            createdAtMs: Int64(Date().timeIntervalSince1970 * 1000),
-            memberDevices: []
-        )
-        try save(info)
-        return info
+    public func reset(masterKey: Data, ourAddress: ProtocolAddress) throws -> StoredSenderKeyInfo {
+        try queue.write { db in
+            let existing = try String.fetchOne(
+                db,
+                sql: "SELECT distribution_id FROM sender_key_info WHERE master_key = ?",
+                arguments: [masterKey]
+            ).flatMap(UUID.init(uuidString:))
+            let distributionId = existing ?? UUID()
+            try db.execute(
+                sql: "DELETE FROM sender_keys WHERE address = ? AND distribution_id = ?",
+                arguments: [GRDBSenderKeyStore.addressKey(ourAddress), distributionId.uuidString]
+            )
+            let info = StoredSenderKeyInfo(
+                masterKey: masterKey,
+                distributionId: distributionId,
+                createdAtMs: Int64(Date().timeIntervalSince1970 * 1000),
+                memberDevices: []
+            )
+            try db.execute(
+                sql: """
+                    INSERT OR REPLACE INTO sender_key_info (master_key, distribution_id, created_at, member_devices_json)
+                    VALUES (?, ?, ?, '[]')
+                    """,
+                arguments: [masterKey, distributionId.uuidString, info.createdAtMs]
+            )
+            return info
+        }
     }
 }

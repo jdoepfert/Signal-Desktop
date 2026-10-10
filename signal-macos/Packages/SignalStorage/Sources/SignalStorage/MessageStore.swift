@@ -250,8 +250,11 @@ public final class MessageStore: Sendable, MessageWriting {
     }
 
     /// Message sightings never write roster data: they only flag the group
-    /// for a server refresh (unknown groups get an empty roster row so the
-    /// flag has a home). Roster writes happen exclusively through
+    /// for a server refresh, like Desktop's `maybeUpdateGroup`, which
+    /// fetches only when the message claims a revision newer than the one
+    /// it holds. Unknown groups get an empty placeholder row with no server
+    /// revision, so the flag has a home and any fetched revision applies.
+    /// Roster writes happen exclusively through
     /// `GroupStateTable.applyFetchedState` with server data. `senderAci`
     /// stays in the signature so callers do not churn; it is unused.
     static func applyMembership(
@@ -261,11 +264,16 @@ public final class MessageStore: Sendable, MessageWriting {
     ) throws {
         try db.execute(
             sql: """
-                INSERT INTO group_state (master_key, revision, members_json, sender_epoch, needs_refresh)
-                VALUES (?, 0, '[]', 0, 1)
-                ON CONFLICT(master_key) DO UPDATE SET needs_refresh = 1
+                INSERT INTO group_state
+                    (master_key, revision, members_json, sender_epoch, needs_refresh, server_revision)
+                VALUES (?, 0, '[]', 0, 1, NULL)
+                ON CONFLICT(master_key) DO UPDATE SET needs_refresh = CASE
+                    WHEN group_state.server_revision IS NULL THEN 1
+                    WHEN ? > group_state.server_revision THEN 1
+                    ELSE group_state.needs_refresh
+                END
                 """,
-            arguments: [membership.masterKey]
+            arguments: [membership.masterKey, Int64(membership.revision)]
         )
     }
 

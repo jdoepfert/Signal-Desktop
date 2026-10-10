@@ -9,7 +9,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 11
+    public static let currentVersion = 12
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -259,6 +259,22 @@ public enum MigrationChain {
                 t.column("created_at", .integer).notNull()
                 t.column("member_devices_json", .text).notNull()
             }
+        }
+        migrator.registerMigration("v12-group-server-state") { db in
+            // `server_revision` is the revision of the last APPLIED server
+            // state; NULL means none yet (placeholder from a sighting), so
+            // any fetched revision applies — including 0, a fresh group.
+            // Every roster stored so far is untrusted: message-derived, or
+            // its revision blanked by v10. Drop the members, mark them as
+            // having no server state and flag them; the next fetch (or the
+            // send path's noOtherMembers refresh) rebuilds from truth.
+            try db.alter(table: "group_state") { t in
+                t.add(column: "server_revision", .integer)
+            }
+            try db.execute(sql: """
+                UPDATE group_state
+                SET server_revision = NULL, members_json = '[]', revision = 0, needs_refresh = 1
+                """)
         }
         return migrator
     }
