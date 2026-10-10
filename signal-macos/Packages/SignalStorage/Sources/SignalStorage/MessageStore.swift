@@ -249,75 +249,23 @@ public final class MessageStore: Sendable, MessageWriting {
         return PersistResult(rowId: rowId, conversationId: conversationId, inserted: inserted)
     }
 
-    /// Applies a group membership delta revision-gated: unknown groups
-    /// bootstrap from the sender plus additions; stale revisions are
-    /// ignored (redeliveries must not downgrade the roster).
+    /// Message sightings never write roster data: they only flag the group
+    /// for a server refresh (unknown groups get an empty roster row so the
+    /// flag has a home). Roster writes happen exclusively through
+    /// `GroupStateTable.applyFetchedState` with server data. `senderAci`
+    /// stays in the signature so callers do not churn; it is unused.
     static func applyMembership(
         _ membership: GroupMembership,
         senderAci: String,
         in db: Database
     ) throws {
-        struct RevisionRow: FetchableRecord {
-            let revision: Int64
-            let membersJson: String
-            let senderEpoch: Int64?
-
-            init(row: Row) {
-                revision = row["revision"]
-                membersJson = row["members_json"]
-                senderEpoch = row["sender_epoch"]
-            }
-        }
-        let existing = try RevisionRow.fetchOne(
-            db,
-            sql: "SELECT revision, members_json, sender_epoch FROM group_state WHERE master_key = ?",
-            arguments: [membership.masterKey]
-        )
-        if let existing {
-            guard Int64(membership.revision) >= existing.revision else {
-                return
-            }
-            // A corrupt stored roster is a hard error, never a silent union
-            // onto [] (which would drop real members on the next update).
-            // It propagates to the receive path, which logs the reason.
-            guard let current = try? JSONDecoder().decode([String].self, from: Data(existing.membersJson.utf8)) else {
-                throw DatabaseError(message: "invalid group members")
-            }
-            if Int64(membership.revision) == existing.revision {
-                // A sender-key authenticated message proves this account is
-                // currently able to send in the group. Learn newly observed
-                // peers at the same revision, but do not apply stale change
-                // actions/removals from that message.
-                guard !membership.removed.contains(senderAci), !current.contains(senderAci) else {
-                    return
-                }
-                let members = Array(Set(current + [senderAci])).sorted()
-                let encoded = String(data: try JSONEncoder().encode(members), encoding: .utf8) ?? "[]"
-                try db.execute(
-                    sql: "UPDATE group_state SET members_json = ? WHERE master_key = ?",
-                    arguments: [encoded, membership.masterKey]
-                )
-                return
-            }
-            let members = Array(
-                Set(current).union(membership.added).union([senderAci]).subtracting(membership.removed)
-            ).sorted()
-            // A member actually gone rotates our sending chain with the
-            // roster update, in the same transaction.
-            let removed = Set(membership.removed).intersection(current)
-            let epoch = (existing.senderEpoch ?? 0) + (removed.isEmpty ? 0 : 1)
-            let encoded = String(data: try JSONEncoder().encode(members), encoding: .utf8) ?? "[]"
-            try db.execute(
-                sql: "UPDATE group_state SET revision = ?, members_json = ?, sender_epoch = ? WHERE master_key = ?",
-                arguments: [Int64(membership.revision), encoded, epoch, membership.masterKey]
-            )
-            return
-        }
-        let members = Array(Set(membership.added + [senderAci])).sorted()
-        let encoded = String(data: try JSONEncoder().encode(members), encoding: .utf8) ?? "[]"
         try db.execute(
-            sql: "INSERT INTO group_state (master_key, revision, members_json, sender_epoch) VALUES (?, ?, ?, 0)",
-            arguments: [membership.masterKey, Int64(membership.revision), encoded]
+            sql: """
+                INSERT INTO group_state (master_key, revision, members_json, sender_epoch, needs_refresh)
+                VALUES (?, 0, '[]', 0, 1)
+                ON CONFLICT(master_key) DO UPDATE SET needs_refresh = 1
+                """,
+            arguments: [membership.masterKey]
         )
     }
 

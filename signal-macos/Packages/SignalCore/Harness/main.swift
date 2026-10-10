@@ -79,6 +79,7 @@ await runAsync("StorageTests") {
     runV5ToV6MigrationTests()
     runV7ToV8MigrationTests()
     runV8ToV9MigrationTests()
+    runV9ToV10MigrationTests()
     await runIdentityTests()
     await runSameKeyConcurrencyTests()
 }

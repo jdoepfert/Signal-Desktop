@@ -96,6 +96,9 @@ public final class AppState: ObservableObject {
     private var linkTask: Task<Void, Never>?
     private var connectTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
+    /// Groups with a server refresh in flight (drain below never runs two
+    /// for the same group).
+    private var groupRefreshInflight: Set<Data> = []
     private static let logger = Logger(subsystem: "app", category: "lifecycle")
 
     /// Alert policy for inbound messages; `locked` flips to title-only
@@ -371,9 +374,10 @@ public final class AppState: ObservableObject {
 
     /// Server roster refresh before a group send: credential chain over the
     /// chat socket, storage GET, revision-gated merge, title store. Returns
-    /// whether a retry is worthwhile. Every failure sets the banner and
-    /// keeps the thread — the send path owns no throw here.
-    private func refreshGroupFromServer(masterKey: Data) async -> Bool {
+    /// whether a retry is worthwhile. Failures set the banner (unless
+    /// quiet, for background drains) and keep the thread — the send path
+    /// owns no throw here.
+    private func refreshGroupFromServer(masterKey: Data, quiet: Bool = false) async -> Bool {
         guard let stack, let linkedAci else {
             return false
         }
@@ -411,11 +415,43 @@ public final class AppState: ObservableObject {
             )
             return true
         } catch GroupFetchError.transferFailed(status: 403) {
-            self.error = "Cannot send: this group is unavailable (you may have been removed)."
+            failRefresh("Cannot send: this group is unavailable (you may have been removed).", quiet: quiet)
             return false
         } catch {
-            self.error = "Cannot send: could not refresh the group (\(ErrorReason.describe(error)))."
+            failRefresh("Cannot send: could not refresh the group (\(ErrorReason.describe(error))).", quiet: quiet)
             return false
+        }
+    }
+
+    /// Refresh failure reporting: the send path banners; background drains
+    /// log (status/reason only) and leave the group flagged for next time.
+    private func failRefresh(_ message: String, quiet: Bool) {
+        if quiet {
+            Self.logger.error("background group refresh failed (\(message))")
+        } else {
+            self.error = message
+        }
+    }
+
+    /// Background drain of groups flagged by message sightings: one fetch
+    /// in flight per group; failures stay flagged for the next drain.
+    private func drainGroupsNeedingRefresh() {
+        guard let stack else {
+            return
+        }
+        guard let pending = try? stack.groups.groupsNeedingRefresh() else {
+            return
+        }
+        for masterKey in pending where !groupRefreshInflight.contains(masterKey) {
+            groupRefreshInflight.insert(masterKey)
+            Task {
+                let ok = await self.refreshGroupFromServer(masterKey: masterKey, quiet: true)
+                self.groupRefreshInflight.remove(masterKey)
+                if ok {
+                    self.refreshConversations()
+                    await self.reloadThread()
+                }
+            }
         }
     }
 
@@ -852,6 +888,9 @@ public final class AppState: ObservableObject {
                 }
             }
         }
+        // Groups flagged by earlier sightings (including pre-launch ones)
+        // refresh now that the socket is up.
+        drainGroupsNeedingRefresh()
     }
 
     private func handleDeviceUnlinked() {
@@ -872,6 +911,9 @@ public final class AppState: ObservableObject {
                 // The receiver already committed the row, the conversation
                 // link, recency and unread count in the decrypt transaction.
                 refreshConversations()
+                // Message sightings flag groups; refresh them without
+                // blocking this message.
+                drainGroupsNeedingRefresh()
                 if message.kind == MessageKind.contactSync {
                     // Bookkeeping, not chat: ingest in the background.
                     Task {

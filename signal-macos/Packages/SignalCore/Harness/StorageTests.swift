@@ -18,7 +18,7 @@ func runStorageTests() async {
         let back = try await db.keyValue.get("k")
         check(
             "StorageTests.testMemoryRoundTrip",
-            back == Data("value".utf8) && MigrationChain.currentVersion == 9
+            back == Data("value".utf8) && MigrationChain.currentVersion == 10
         )
     } catch {
         check("StorageTests.testMemoryRoundTrip", false, "\(error)")
@@ -162,7 +162,9 @@ func runV5ToV6MigrationTests() {
 }
 
 // v7 -> v8: a pre-existing group row keeps its members and gains
-// sender_epoch 0 (no spurious rotation for old groups).
+// sender_epoch 0 (no spurious rotation for old groups). (The v10
+// migration later resets the message-derived revision to 0; that is
+// pinned by testV9ToV10Migration, not here.)
 func runV7ToV8MigrationTests() {
     do {
         let queue = try DatabaseQueue()
@@ -173,7 +175,7 @@ func runV7ToV8MigrationTests() {
                 VALUES (x'010203', 2, '["alice","bob"]')
                 """)
         }
-        try MigrationChain.migrate(queue)
+        try MigrationChain.migrate(queue, through: "v8-sender-epoch")
         var epoch: Int?
         var members: String?
         var revision: Int?
@@ -189,6 +191,35 @@ func runV7ToV8MigrationTests() {
         )
     } catch {
         check("StorageTests.testV7ToV8Migration", false, "\(error)")
+    }
+}
+
+// v9 -> v10: message-derived revisions reset to 0 (untrusted), members and
+// epoch survive, and every pre-existing group is flagged for a server
+// refresh so the roster rebuilds from truth.
+func runV9ToV10MigrationTests() {
+    do {
+        let queue = try DatabaseQueue()
+        try MigrationChain.migrate(queue, through: "v8-sender-epoch")
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO group_state (master_key, revision, members_json, sender_epoch)
+                VALUES (x'010203', 9, '["alice","bob"]', 1)
+                """)
+        }
+        try MigrationChain.migrate(queue)
+        let table = GroupStateTable(queue: queue)
+        let state = try table.load(masterKey: Data([0x01, 0x02, 0x03]))
+        try checkT(
+            "StorageTests.testV9ToV10Migration",
+            state?.revision == 0
+                && state?.members == ["alice", "bob"]
+                && state?.senderEpoch == 1
+                && (try table.groupsNeedingRefresh()) == [Data([0x01, 0x02, 0x03])],
+            "state=\(String(describing: state))"
+        )
+    } catch {
+        check("StorageTests.testV9ToV10Migration", false, "\(error)")
     }
 }
 

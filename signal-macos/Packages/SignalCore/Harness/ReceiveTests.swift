@@ -44,8 +44,10 @@ func runReceiveTests() async {
     await testRawSkdmPlaintextIsRejected()
     await testSentSyncLandsInDestinationThread()
     await testSentSyncGroupBootstrapsRoster()
-    testGroupRosterAddsSendersAtSameRevision()
-    testCorruptRosterDecodeThrows()
+    await testMessageCannotAddMember()
+    await testMessageCannotRemoveMember()
+    await testForgedRevisionDoesNotBlockServerMerge()
+    await testFirstSightingFlagsRefresh()
     await testSentSyncFromOtherSenderIgnored()
     await testPaddingFailureKeepsNothingAndDoesNotCrash()
     await testConcurrentDecryptSameSender()
@@ -444,8 +446,8 @@ private func testSenderKeyMessageLandsInGroupThread() async {
                 && stored?.body == "hi group"
                 && stored?.senderAci == peer.aci
                 && stored?.conversationId == "group:" + masterKey.map({ String(format: "%02x", $0) }).joined()
-                && state?.revision == 3
-                && (state?.members.contains(peer.aci) ?? false)
+                && (state?.members ?? ["?"]).isEmpty
+                && (state?.needsRefresh ?? false)
                 && acks.allExactlyOnce,
             "stored=\(String(describing: stored)) state=\(String(describing: state))"
         )
@@ -700,9 +702,8 @@ private func testSentSyncLandsInDestinationThread() async {
     }
 }
 
-// A group sent-sync arrives on the linked device's own account. It must
-// preserve the GroupContextV2 membership bootstrap just like an inbound
-// group message, or a later Mac reply has no recipient roster.
+// A group sent-sync threads the conversation but writes no roster data:
+// the sighting only flags a server refresh.
 private func testSentSyncGroupBootstrapsRoster() async {
     do {
         let ownAci = "bbbbbbbb-1111-4222-8333-444444444444"
@@ -710,7 +711,6 @@ private func testSentSyncGroupBootstrapsRoster() async {
         try rig.provisionOwnKeys()
         let primary = try TestPeer(aci: ownAci, deviceId: 1)
         try primary.establish(with: rig.makeBundle(), recipient: rig.address)
-        let peerAci = "cccccccc-1111-4222-8333-444444444444"
         let masterKey = Data(repeating: 0x3C, count: 32)
         let ts: UInt64 = 1_700_000_150_000
         var group = SignalServiceProtos_GroupContextV2()
@@ -742,8 +742,8 @@ private func testSentSyncGroupBootstrapsRoster() async {
         try checkT(
             "ReceiveTests.testSentSyncGroupBootstrapsRoster",
             stored?.conversationId == "group:" + masterKey.map { String(format: "%02x", $0) }.joined()
-                && state?.revision == 4
-                && (state?.members.contains(ownAci) ?? false),
+                && (state?.members ?? ["?"]).isEmpty
+                && (state?.needsRefresh ?? false),
             "stored=\(String(describing: stored)) state=\(String(describing: state))"
         )
     } catch {
@@ -751,88 +751,235 @@ private func testSentSyncGroupBootstrapsRoster() async {
     }
 }
 
-// Same-revision group chat from another authenticated participant contributes
-// that sender to the bootstrapped roster. It does not apply a stale change,
-// but allows a synced message to populate peers omitted by the local
-// sent-sync transcript.
-private func testGroupRosterAddsSendersAtSameRevision() {
+// Helpers for message-carried group changes (wire bytes only; the receiver
+// must treat them as untrusted hints, never roster writes).
+private func groupTextMessage(
+    masterKey: Data,
+    revision: UInt32,
+    body: String,
+    timestamp: UInt64,
+    change: Data? = nil
+) throws -> Data {
+    var groupV2 = SignalServiceProtos_GroupContextV2()
+    groupV2.masterKey = masterKey
+    groupV2.revision = revision
+    if let change {
+        groupV2.groupChange = change
+    }
+    var message = SignalServiceProtos_DataMessage()
+    message.body = body
+    message.timestamp = timestamp
+    message.groupV2 = groupV2
+    var content = SignalServiceProtos_Content()
+    content.dataMessage = message
+    return try content.serializedData()
+}
+
+private func groupChangeAdding(_ aci: String) throws -> Data {
+    let uuid = UUID(uuidString: aci)!
+    let bytes = withUnsafeBytes(of: uuid.uuid) { Data($0) }
+    var member = SignalServiceProtos_Member()
+    member.userID = bytes
+    var add = SignalServiceProtos_GroupChange.Actions.AddMemberAction()
+    add.added = member
+    var actions = SignalServiceProtos_GroupChange.Actions()
+    actions.addMembers = [add]
+    var change = SignalServiceProtos_GroupChange()
+    change.actions = try actions.serializedData()
+    return try change.serializedData()
+}
+
+private func groupChangeDeleting(_ aci: String) throws -> Data {
+    let uuid = UUID(uuidString: aci)!
+    let bytes = withUnsafeBytes(of: uuid.uuid) { Data($0) }
+    var remove = SignalServiceProtos_GroupChange.Actions.DeleteMemberAction()
+    remove.deletedUserID = bytes
+    var actions = SignalServiceProtos_GroupChange.Actions()
+    actions.deleteMembers = [remove]
+    var change = SignalServiceProtos_GroupChange()
+    change.actions = try actions.serializedData()
+    return try change.serializedData()
+}
+
+// A message from a non-member never adds to the roster — not at an equal,
+// higher, or any revision, with or without a change adding the sender. The
+// message itself is still stored, and the group is flagged for refresh.
+private func testMessageCannotAddMember() async {
     do {
-        let local = "bbbbbbbb-1111-4222-8333-444444444444"
-        let rig = try ReceiverRig(ourAci: local, ourDevice: 3)
-        let masterKey = Data(repeating: 0x42, count: 32)
-        let peer = "cccccccc-1111-4222-8333-444444444444"
-        try rig.db.queue.write { connection in
+        let (rig, peer, _) = try bobAndPeer()
+        let carol = try TestPeer(aci: "cccccccc-1111-4222-8333-444444444444", deviceId: 1)
+        try carol.establish(with: rig.makeBundle(), recipient: rig.address)
+        let masterKey = Data(repeating: 0x51, count: 32)
+        let ts: UInt64 = 1_700_000_600_000
+        let seedMembers = "[\"\(peer.aci)\",\"\(rig.ourAci)\"]"
+        try await rig.db.queue.write { connection in
             try connection.execute(sql: """
                 INSERT INTO group_state (master_key, revision, members_json, sender_epoch)
-                VALUES (?, 4, ?, 0)
-                """, arguments: [masterKey, "[\"dddddddd-1111-4222-8333-444444444444\"]"])
+                VALUES (?, 2, ?, 0)
+                """, arguments: [masterKey, seedMembers])
         }
-        try rig.store.withTransaction { transaction in
-            _ = try rig.messages.persist(
-                NewMessage(
-                    senderAci: peer,
-                    body: "peer joined through chat",
-                    sentTimestamp: 1_700_000_160_000,
-                    target: .group(masterKey: masterKey),
-                    membership: GroupMembership(
-                        masterKey: masterKey,
-                        revision: 4,
-                        added: [],
-                        removed: []
-                    )
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try prekeyEnvelope(
+                from: carol,
+                to: rig,
+                content: try groupTextMessage(
+                    masterKey: masterKey,
+                    revision: 5,
+                    body: "let me in",
+                    timestamp: ts,
+                    change: try groupChangeAdding(carol.aci)
                 ),
-                in: transaction
+                clientTimestamp: ts
             )
-        }
-        let state = try GroupStateTable(queue: rig.db.queue).load(masterKey: masterKey)
-        check(
-            "ReceiveTests.testGroupRosterAddsSendersAtSameRevision",
-            state?.members.contains("dddddddd-1111-4222-8333-444444444444") == true
-                && state?.members.contains(peer) == true,
+        ))
+        let table = GroupStateTable(queue: rig.db.queue)
+        let state = try table.load(masterKey: masterKey)
+        try checkT(
+            "ReceiveTests.testMessageCannotAddMember",
+            (try rig.messages.all()).count == 1
+                && Set(state?.members ?? []) == Set([peer.aci, rig.ourAci])
+                && (try table.groupsNeedingRefresh()).contains(masterKey),
             "state=\(String(describing: state))"
         )
     } catch {
-        check("ReceiveTests.testGroupRosterAddsSendersAtSameRevision", false, "\(error)")
+        check("ReceiveTests.testMessageCannotAddMember", false, "\(error)")
     }
 }
 
-// A corrupt stored roster must surface, never silently union onto an empty
-// list (which would drop real members on the next update).
-private func testCorruptRosterDecodeThrows() {
+// A message-carried change deleting a member leaves the roster untouched.
+private func testMessageCannotRemoveMember() async {
     do {
-        let local = "bbbbbbbb-1111-4222-8333-444444444444"
-        let rig = try ReceiverRig(ourAci: local, ourDevice: 3)
-        let masterKey = Data(repeating: 0x43, count: 32)
-        try rig.db.queue.write { connection in
+        let (rig, peer, _) = try bobAndPeer()
+        let masterKey = Data(repeating: 0x52, count: 32)
+        let ts: UInt64 = 1_700_000_610_000
+        let seedMembers = "[\"\(peer.aci)\",\"\(rig.ourAci)\"]"
+        try await rig.db.queue.write { connection in
             try connection.execute(sql: """
                 INSERT INTO group_state (master_key, revision, members_json, sender_epoch)
-                VALUES (?, 4, 'not-json', 0)
-                """, arguments: [masterKey])
+                VALUES (?, 2, ?, 0)
+                """, arguments: [masterKey, seedMembers])
         }
-        do {
-            try rig.store.withTransaction { transaction in
-                _ = try rig.messages.persist(
-                    NewMessage(
-                        senderAci: "cccccccc-1111-4222-8333-444444444444",
-                        body: "update over corrupt roster",
-                        sentTimestamp: 1_700_000_170_000,
-                        target: .group(masterKey: masterKey),
-                        membership: GroupMembership(
-                            masterKey: masterKey,
-                            revision: 5,
-                            added: [],
-                            removed: []
-                        )
-                    ),
-                    in: transaction
-                )
-            }
-            check("ReceiveTests.testCorruptRosterDecodeThrows", false, "no error thrown")
-        } catch {
-            check("ReceiveTests.testCorruptRosterDecodeThrows", true)
-        }
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try groupTextMessage(
+                    masterKey: masterKey,
+                    revision: 3,
+                    body: "kick",
+                    timestamp: ts,
+                    change: try groupChangeDeleting(rig.ourAci)
+                ),
+                clientTimestamp: ts
+            )
+        ))
+        let table = GroupStateTable(queue: rig.db.queue)
+        let state = try table.load(masterKey: masterKey)
+        try checkT(
+            "ReceiveTests.testMessageCannotRemoveMember",
+            (try rig.messages.all()).count == 1
+                && Set(state?.members ?? []) == Set([peer.aci, rig.ourAci])
+                && (try table.groupsNeedingRefresh()).contains(masterKey),
+            "state=\(String(describing: state))"
+        )
     } catch {
-        check("ReceiveTests.testCorruptRosterDecodeThrows", false, "\(error)")
+        check("ReceiveTests.testMessageCannotRemoveMember", false, "\(error)")
+    }
+}
+
+// A forged high revision never blocks the server merge: after the message,
+// server state at a lower revision still applies.
+private func testForgedRevisionDoesNotBlockServerMerge() async {
+    do {
+        let (rig, _, _) = try bobAndPeer()
+        let carol = try TestPeer(aci: "cccccccc-1111-4222-8333-444444444444", deviceId: 1)
+        try carol.establish(with: rig.makeBundle(), recipient: rig.address)
+        let masterKey = Data(repeating: 0x53, count: 32)
+        let dave = "dddddddd-1111-4222-8333-444444444444"
+        let ts: UInt64 = 1_700_000_620_000
+        let seedMembers = "[\"\(rig.ourAci)\"]"
+        try await rig.db.queue.write { connection in
+            try connection.execute(sql: """
+                INSERT INTO group_state (master_key, revision, members_json, sender_epoch)
+                VALUES (?, 2, ?, 0)
+                """, arguments: [masterKey, seedMembers])
+        }
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try prekeyEnvelope(
+                from: carol,
+                to: rig,
+                content: try groupTextMessage(
+                    masterKey: masterKey,
+                    revision: UInt32.max,
+                    body: "forged",
+                    timestamp: ts,
+                    change: try groupChangeAdding(carol.aci)
+                ),
+                clientTimestamp: ts
+            )
+        ))
+        let table = GroupStateTable(queue: rig.db.queue)
+        let beforeMerge = try table.load(masterKey: masterKey)
+        let merged = try table.applyFetchedState(
+            masterKey: masterKey,
+            revision: 7,
+            members: [rig.ourAci, dave]
+        )
+        let afterMerge = try table.load(masterKey: masterKey)
+        try checkT(
+            "ReceiveTests.testForgedRevisionDoesNotBlockServerMerge",
+            Set(beforeMerge?.members ?? []) == Set([rig.ourAci])
+                && merged
+                && Set(afterMerge?.members ?? []) == Set([rig.ourAci, dave])
+                && afterMerge?.revision == 7,
+            "before=\(String(describing: beforeMerge)) after=\(String(describing: afterMerge))"
+        )
+    } catch {
+        check("ReceiveTests.testForgedRevisionDoesNotBlockServerMerge", false, "\(error)")
+    }
+}
+
+// An unknown group's first message creates the conversation and stores the
+// row, but the roster stays empty and the group is flagged for refresh.
+private func testFirstSightingFlagsRefresh() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let masterKey = Data(repeating: 0x54, count: 32)
+        let ts: UInt64 = 1_700_000_630_000
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try prekeyEnvelope(
+                from: peer,
+                to: rig,
+                content: try groupTextMessage(
+                    masterKey: masterKey,
+                    revision: 4,
+                    body: "first sighting",
+                    timestamp: ts
+                ),
+                clientTimestamp: ts
+            )
+        ))
+        let table = GroupStateTable(queue: rig.db.queue)
+        let state = try table.load(masterKey: masterKey)
+        let conversations = try rig.conversations.allConversations()
+        try checkT(
+            "ReceiveTests.testFirstSightingFlagsRefresh",
+            (try rig.messages.all()).count == 1
+                && conversations.contains(where: { $0.id == "group:" + masterKey.map({ String(format: "%02x", $0) }).joined() })
+                && (state?.members ?? ["?"]).isEmpty
+                && (try table.groupsNeedingRefresh()).contains(masterKey),
+            "state=\(String(describing: state))"
+        )
+    } catch {
+        check("ReceiveTests.testFirstSightingFlagsRefresh", false, "\(error)")
     }
 }
 

@@ -91,6 +91,11 @@ public final class GroupManager: @unchecked Sendable {
         ))
     }
 
+    /// Master keys flagged by message sightings for a server refresh.
+    public func groupsNeedingRefresh() throws -> [Data] {
+        try groups.groupsNeedingRefresh()
+    }
+
     public func joinKnownGroup(
         masterKey: Data,
         revision: UInt32,
@@ -117,13 +122,10 @@ public final class GroupManager: @unchecked Sendable {
         revision: UInt32,
         members: [String]
     ) throws -> Bool {
-        // Server state never downgrades the roster: a stored revision at or
-        // past the fetched one wins (same gate as `applyMembership`).
-        if let existing = try groups.load(masterKey: masterKey), existing.revision >= revision {
-            return false
-        }
-        try joinKnownGroup(masterKey: masterKey, revision: revision, members: members)
-        return true
+        // Server state never downgrades the roster: the table gates on the
+        // last applied SERVER revision (message-claimed revisions never
+        // block it) and clears the refresh flag on apply.
+        try groups.applyFetchedState(masterKey: masterKey, revision: revision, members: members)
     }
 
     /// Applies fetched server state as one gated unit: the revision-gated

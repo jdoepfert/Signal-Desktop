@@ -436,30 +436,19 @@ func runGroupTests() async {
             check("MessagingTests.testGroupRetryAfterRemovalUsesFreshChain", false, "\(error)")
         }
 
-        // GroupChange wrapper: change bytes hold a serialized GroupChange whose
-        // `actions` field carries the Actions (Desktop groups.preload.ts), not
-        // the Actions themselves.
+        // GroupChange bytes are untrusted: the sighting carries master key
+        // + revision only, never roster deltas — even for a well-formed
+        // change wrapper adding a member.
         do {
-            let bobUuid = UUID(uuidString: groupBob)!
-            let bobBytes = withUnsafeBytes(of: bobUuid.uuid) { Data($0) }
-            var member = SignalServiceProtos_Member()
-            member.userID = bobBytes
-            var add = SignalServiceProtos_GroupChange.Actions.AddMemberAction()
-            add.added = member
-            var actions = SignalServiceProtos_GroupChange.Actions()
-            actions.addMembers = [add]
-            var change = SignalServiceProtos_GroupChange()
-            change.actions = try actions.serializedData()
-            let changeBytes = try change.serializedData()
             let membership = GroupStateService.membership(
                 masterKey: Data(repeating: 0x07, count: 32),
-                revision: 5,
-                senderAci: groupAlice,
-                changeBytes: changeBytes
+                revision: 5
             )
             check(
                 "MessagingTests.testGroupChangeWrapperDecodes",
-                membership?.added == [groupBob.lowercased()] && membership?.revision == 5,
+                membership?.added.isEmpty == true
+                    && membership?.removed.isEmpty == true
+                    && membership?.revision == 5,
                 "\(String(describing: membership))"
             )
         } catch {

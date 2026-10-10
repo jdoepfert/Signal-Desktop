@@ -9,7 +9,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 9
+    public static let currentVersion = 10
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -233,6 +233,18 @@ public enum MigrationChain {
                 t.add(column: "waveform", .blob).notNull().defaults(to: Data())
                 t.add(column: "duration_seconds", .double).notNull().defaults(to: 0.0)
             }
+        }
+        migrator.registerMigration("v10-group-refresh") { db in
+            // Group rosters are server-authoritative: message sightings only
+            // flag a refresh, so track that here. Stored revisions so far
+            // are message-derived (untrusted, possibly forged high), so
+            // reset them and flag every pre-existing group: the next fetch
+            // rebuilds the roster from truth. Members and sender epoch
+            // survive untouched.
+            try db.alter(table: "group_state") { t in
+                t.add(column: "needs_refresh", .integer).notNull().defaults(to: 0)
+            }
+            try db.execute(sql: "UPDATE group_state SET revision = 0, needs_refresh = 1")
         }
         return migrator
     }

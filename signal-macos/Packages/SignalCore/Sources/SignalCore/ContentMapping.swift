@@ -259,12 +259,11 @@ enum ContentMapping {
         if dataMessage.hasGroupV2, dataMessage.groupV2.masterKey.count == 32 {
             let masterKey = dataMessage.groupV2.masterKey
             target = .group(masterKey: masterKey)
-            let changeBytes = dataMessage.groupV2.hasGroupChange ? dataMessage.groupV2.groupChange : nil
+            // Message-carried GroupChange bytes are untrusted: the sighting
+            // flags a server refresh, nothing more.
             membership = GroupStateService.membership(
                 masterKey: masterKey,
-                revision: dataMessage.groupV2.revision,
-                senderAci: context.senderAci,
-                changeBytes: changeBytes
+                revision: dataMessage.groupV2.revision
             )
         }
         guard !body.isEmpty || unsupported || attachment != nil || membership != nil else {
