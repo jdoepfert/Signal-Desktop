@@ -265,13 +265,29 @@ public final class MessageStore: Sendable, MessageWriting {
             arguments: [membership.masterKey]
         )
         if let existing {
-            guard Int64(membership.revision) > existing.revision else {
+            guard Int64(membership.revision) >= existing.revision else {
                 return
             }
             let current =
                 (try? JSONDecoder().decode([String].self, from: Data(existing.membersJson.utf8))) ?? []
+            if Int64(membership.revision) == existing.revision {
+                // A sender-key authenticated message proves this account is
+                // currently able to send in the group. Learn newly observed
+                // peers at the same revision, but do not apply stale change
+                // actions/removals from that message.
+                guard !membership.removed.contains(senderAci), !current.contains(senderAci) else {
+                    return
+                }
+                let members = Array(Set(current + [senderAci])).sorted()
+                let encoded = String(data: try JSONEncoder().encode(members), encoding: .utf8) ?? "[]"
+                try db.execute(
+                    sql: "UPDATE group_state SET members_json = ? WHERE master_key = ?",
+                    arguments: [encoded, membership.masterKey]
+                )
+                return
+            }
             let members = Array(
-                Set(current).union(membership.added).subtracting(membership.removed)
+                Set(current).union(membership.added).union([senderAci]).subtracting(membership.removed)
             ).sorted()
             // A member actually gone rotates our sending chain with the
             // roster update, in the same transaction.

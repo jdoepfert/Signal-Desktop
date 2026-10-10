@@ -40,6 +40,8 @@ func runReceiveTests() async {
     await testGroupMessageMapsToThread()
     await testSenderKeyMessageLandsInGroupThread()
     await testSentSyncLandsInDestinationThread()
+    await testSentSyncGroupBootstrapsRoster()
+    testGroupRosterAddsSendersAtSameRevision()
     await testSentSyncFromOtherSenderIgnored()
     await testPaddingFailureKeepsNothingAndDoesNotCrash()
     await testConcurrentDecryptSameSender()
@@ -521,6 +523,102 @@ private func testSentSyncLandsInDestinationThread() async {
         )
     } catch {
         check("ReceiveTests.testSentSyncLandsInDestinationThread", false, "\(error)")
+    }
+}
+
+// A group sent-sync arrives on the linked device's own account. It must
+// preserve the GroupContextV2 membership bootstrap just like an inbound
+// group message, or a later Mac reply has no recipient roster.
+private func testSentSyncGroupBootstrapsRoster() async {
+    do {
+        let ownAci = "bbbbbbbb-1111-4222-8333-444444444444"
+        let rig = try ReceiverRig(ourAci: ownAci, ourDevice: 3)
+        try rig.provisionOwnKeys()
+        let primary = try TestPeer(aci: ownAci, deviceId: 1)
+        try primary.establish(with: rig.makeBundle(), recipient: rig.address)
+        let peerAci = "cccccccc-1111-4222-8333-444444444444"
+        let masterKey = Data(repeating: 0x3C, count: 32)
+        let ts: UInt64 = 1_700_000_150_000
+        var group = SignalServiceProtos_GroupContextV2()
+        group.masterKey = masterKey
+        group.revision = 4
+        var dataMessage = SignalServiceProtos_DataMessage()
+        dataMessage.body = "phone group send"
+        dataMessage.timestamp = ts
+        dataMessage.groupV2 = group
+        var sent = SignalServiceProtos_SyncMessage.Sent()
+        sent.destinationServiceID = "group:" + masterKey.map { String(format: "%02x", $0) }.joined()
+        sent.timestamp = ts
+        sent.message = dataMessage
+        var sync = SignalServiceProtos_SyncMessage()
+        sync.sent = sent
+        var content = SignalServiceProtos_Content()
+        content.syncMessage = sync
+        let receiver = try rig.receiver(trustRoots: [])
+        await receiver.process(AckCounter().envelope(
+            try prekeyEnvelope(
+                from: primary,
+                to: rig,
+                content: try content.serializedData(),
+                clientTimestamp: ts
+            )
+        ))
+        let stored = try rig.messages.all().first
+        let state = try GroupStateTable(queue: rig.db.queue).load(masterKey: masterKey)
+        try checkT(
+            "ReceiveTests.testSentSyncGroupBootstrapsRoster",
+            stored?.conversationId == "group:" + masterKey.map { String(format: "%02x", $0) }.joined()
+                && state?.revision == 4
+                && (state?.members.contains(ownAci) ?? false),
+            "stored=\(String(describing: stored)) state=\(String(describing: state))"
+        )
+    } catch {
+        check("ReceiveTests.testSentSyncGroupBootstrapsRoster", false, "\(error)")
+    }
+}
+
+// Same-revision group chat from another authenticated participant contributes
+// that sender to the bootstrapped roster. It does not apply a stale change,
+// but allows a synced message to populate peers omitted by the local
+// sent-sync transcript.
+private func testGroupRosterAddsSendersAtSameRevision() {
+    do {
+        let local = "bbbbbbbb-1111-4222-8333-444444444444"
+        let rig = try ReceiverRig(ourAci: local, ourDevice: 3)
+        let masterKey = Data(repeating: 0x42, count: 32)
+        let peer = "cccccccc-1111-4222-8333-444444444444"
+        try rig.db.queue.write { connection in
+            try connection.execute(sql: """
+                INSERT INTO group_state (master_key, revision, members_json, sender_epoch)
+                VALUES (?, 4, ?, 0)
+                """, arguments: [masterKey, "[\"dddddddd-1111-4222-8333-444444444444\"]"])
+        }
+        try rig.store.withTransaction { transaction in
+            _ = try rig.messages.persist(
+                NewMessage(
+                    senderAci: peer,
+                    body: "peer joined through chat",
+                    sentTimestamp: 1_700_000_160_000,
+                    target: .group(masterKey: masterKey),
+                    membership: GroupMembership(
+                        masterKey: masterKey,
+                        revision: 4,
+                        added: [],
+                        removed: []
+                    )
+                ),
+                in: transaction
+            )
+        }
+        let state = try GroupStateTable(queue: rig.db.queue).load(masterKey: masterKey)
+        check(
+            "ReceiveTests.testGroupRosterAddsSendersAtSameRevision",
+            state?.members.contains("dddddddd-1111-4222-8333-444444444444") == true
+                && state?.members.contains(peer) == true,
+            "state=\(String(describing: state))"
+        )
+    } catch {
+        check("ReceiveTests.testGroupRosterAddsSendersAtSameRevision", false, "\(error)")
     }
 }
 

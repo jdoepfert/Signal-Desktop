@@ -171,7 +171,8 @@ enum ContentMapping {
             kind: built.unsupported ? MessageKind.unsupported : MessageKind.sentSync,
             // Sent from another of our devices: already delivered.
             status: "sent",
-            attachment: built.attachment
+            attachment: built.attachment,
+            membership: built.membership
         )
     }
 
