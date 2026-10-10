@@ -60,7 +60,16 @@ public struct LiveCDNClient: CDNClient, Sendable {
         var cdn: UInt32
         var key: String
         var headers: [String: String]?
-        var signed_upload_url: String
+        var signedUploadLocation: String?
+        var signed_upload_url: String?
+
+        enum CodingKeys: String, CodingKey {
+            case cdn
+            case key
+            case headers
+            case signedUploadLocation
+            case signed_upload_url
+        }
     }
 
     public func uploadForm(byteCount: UInt64) async throws -> UploadForm {
@@ -77,7 +86,8 @@ public struct LiveCDNClient: CDNClient, Sendable {
         }
         guard
             let form = try? JSONDecoder().decode(FormJSON.self, from: response.body),
-            let url = URL(string: form.signed_upload_url)
+            let location = form.signedUploadLocation ?? form.signed_upload_url,
+            let url = URL(string: location)
         else {
             Self.logger.error("upload form undecodable")
             throw AttachmentError.transferFailed(status: -1)

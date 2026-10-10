@@ -239,7 +239,7 @@ private func uploadFormJSON() throws -> Data {
         "cdn": 0,
         "key": "form-key",
         "headers": ["Content-Type": "application/octet-stream"],
-        "signed_upload_url": "https://example.invalid/signed-put",
+        "signedUploadLocation": "https://example.invalid/signed-put",
     ])
 }
 
@@ -308,5 +308,60 @@ func runLiveCDNTests() async {
         )
     } catch {
         check("MessagingTests.testAttachmentTransportRoundTrip", false, "\(error)")
+    }
+
+    // Upload form with unknown extra fields still decodes (lenient decode).
+    do {
+        let formSend: LiveTransport.AuthenticatedSend = { _ in
+            let json = try JSONSerialization.data(withJSONObject: [
+                "cdn": 0,
+                "key": "form-key",
+                "headers": ["Content-Type": "application/octet-stream"],
+                "signedUploadLocation": "https://example.invalid/signed-put",
+                "someFutureField": ["nested": 1],
+                "anotherUnknown": 42,
+            ])
+            return (200, json)
+        }
+        let client = LiveCDNClient(
+            environment: .staging, formSend: formSend, http: { _ in throw AttachmentError.transferFailed(status: -1) }
+        )
+        let form = try await client.uploadForm(byteCount: 10)
+        check(
+            "MessagingTests.testAttachmentUploadFormIgnoresUnknownFields",
+            form.cdn == 0 && form.key == "form-key"
+                && form.signedUploadUrl.absoluteString == "https://example.invalid/signed-put"
+        )
+    } catch {
+        check("MessagingTests.testAttachmentUploadFormIgnoresUnknownFields", false, "\(error)")
+    }
+
+    // Upload form HTTP 500 surfaces transferFailed(status: 500) with nothing uploaded.
+    do {
+        final class PutProbe: @unchecked Sendable {
+            nonisolated(unsafe) var putCalls = 0
+        }
+        let probe = PutProbe()
+        let formSend: LiveTransport.AuthenticatedSend = { _ in (500, Data()) }
+        let http: LiveCDNClient.HttpSend = { request in
+            probe.putCalls += 1
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+            return (Data(), response)
+        }
+        let client = LiveCDNClient(environment: .staging, formSend: formSend, http: http)
+        do {
+            _ = try await client.uploadForm(byteCount: 10)
+            check("MessagingTests.testAttachmentUploadFormRejected", false, "no error thrown")
+        } catch let error as AttachmentError {
+            check(
+                "MessagingTests.testAttachmentUploadFormRejected",
+                error == .transferFailed(status: 500) && probe.putCalls == 0,
+                "\(error) putCalls=\(probe.putCalls)"
+            )
+        }
+    } catch {
+        check("MessagingTests.testAttachmentUploadFormRejected", false, "\(error)")
     }
 }
