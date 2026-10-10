@@ -18,7 +18,7 @@ func runStorageTests() async {
         let back = try await db.keyValue.get("k")
         check(
             "StorageTests.testMemoryRoundTrip",
-            back == Data("value".utf8) && MigrationChain.currentVersion == 8
+            back == Data("value".utf8) && MigrationChain.currentVersion == 9
         )
     } catch {
         check("StorageTests.testMemoryRoundTrip", false, "\(error)")
@@ -286,5 +286,57 @@ func runMigrationAtomicityTests() {
         try? FileManager.default.removeItem(atPath: path)
     } catch {
         check("StorageTests.testMigrationAtomicity", false, "\(error)")
+    }
+}
+
+// v8 -> v9: a pre-existing attachment row keeps its columns and gains
+// flags 0, empty waveform, duration 0; voice metadata round-trips.
+func runV8ToV9MigrationTests() {
+    do {
+        let queue = try DatabaseQueue()
+        try MigrationChain.migrate(queue, through: "v8-sender-epoch")
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO attachments (digest, cdn_key, cdn_number, size, content_type, key_bytes)
+                VALUES (x'AA', 'k', 2, 100, 'text/plain', x'BB')
+                """)
+        }
+        try MigrationChain.migrate(queue)
+        let table = AttachmentTable(queue: queue)
+        let record = try table.load(digest: Data([0xAA]))
+        check(
+            "StorageTests.testV8ToV9Migration",
+            record?.flags == 0 && record?.waveform == Data() && record?.durationSeconds == 0
+                && record?.cdnKey == "k" && record?.cdnNumber == 2
+                && record?.size == 100 && record?.contentType == "text/plain"
+                && record?.key == Data([0xBB]),
+            "record=\(String(describing: record))"
+        )
+    } catch {
+        check("StorageTests.testV8ToV9Migration", false, "\(error)")
+    }
+
+    do {
+        let db = try SignalDatabase.open(path: nil, key: "k")
+        let table = AttachmentTable(queue: db.queue)
+        try table.save(
+            digest: Data([0xCC]),
+            cdnKey: "voice-key",
+            size: 229_000,
+            contentType: "audio/mp4",
+            key: Data(repeating: 0xDD, count: 64),
+            flags: 1,
+            waveform: Data([3, 200, 17]),
+            durationSeconds: 4.5
+        )
+        let back = try table.load(digest: Data([0xCC]))
+        check(
+            "StorageTests.testVoiceMetadataRoundTrip",
+            back?.flags == 1 && back?.waveform == Data([3, 200, 17]) && back?.durationSeconds == 4.5
+                && back?.contentType == "audio/mp4" && back?.size == 229_000,
+            "record=\(String(describing: back))"
+        )
+    } catch {
+        check("StorageTests.testVoiceMetadataRoundTrip", false, "\(error)")
     }
 }

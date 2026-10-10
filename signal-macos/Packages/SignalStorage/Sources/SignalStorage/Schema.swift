@@ -1,6 +1,7 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import Foundation
 import GRDB
 
 /// Schema registry. Desktop's 145 migrations (`ts/sql/migrations/`) are the
@@ -8,7 +9,7 @@ import GRDB
 /// linked-device needs only. Group/payment/story tables arrive with their
 /// phases as new versions.
 public enum MigrationChain {
-    public static let currentVersion = 8
+    public static let currentVersion = 9
 
     static func migrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -222,6 +223,15 @@ public enum MigrationChain {
             // removed member never receives.
             try db.alter(table: "group_state") { t in
                 t.add(column: "sender_epoch", .integer).notNull().defaults(to: 0)
+            }
+        }
+        migrator.registerMigration("v9-voice-attachment") { db in
+            // Voice-note metadata rides the attachment row: flags (bit 0 =
+            // voice message), waveform peaks (≤100 bytes), duration seconds.
+            try db.alter(table: "attachments") { t in
+                t.add(column: "flags", .integer).notNull().defaults(to: 0)
+                t.add(column: "waveform", .blob).notNull().defaults(to: Data())
+                t.add(column: "duration_seconds", .double).notNull().defaults(to: 0.0)
             }
         }
         return migrator

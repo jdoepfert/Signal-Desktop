@@ -12,6 +12,12 @@ public struct StoredAttachment: Sendable, Equatable {
     public let contentType: String
     public let key: Data
     public let messageId: Int64?
+    /// Attachment flags (bit 0 = voice message).
+    public let flags: UInt32
+    /// Waveform peaks, at most 100 bytes.
+    public let waveform: Data
+    /// Audio duration in seconds (0 when not audio).
+    public let durationSeconds: Double
 
     public init(
         digest: Data,
@@ -20,7 +26,10 @@ public struct StoredAttachment: Sendable, Equatable {
         size: UInt64,
         contentType: String,
         key: Data,
-        messageId: Int64? = nil
+        messageId: Int64? = nil,
+        flags: UInt32 = 0,
+        waveform: Data = Data(),
+        durationSeconds: Double = 0
     ) {
         self.digest = digest
         self.cdnKey = cdnKey
@@ -29,6 +38,9 @@ public struct StoredAttachment: Sendable, Equatable {
         self.contentType = contentType
         self.key = key
         self.messageId = messageId
+        self.flags = flags
+        self.waveform = waveform
+        self.durationSeconds = durationSeconds
     }
 }
 
@@ -48,20 +60,27 @@ public final class AttachmentTable: Sendable {
         cdnNumber: UInt32 = 0,
         size: UInt64,
         contentType: String,
-        key: Data
+        key: Data,
+        flags: UInt32 = 0,
+        waveform: Data = Data(),
+        durationSeconds: Double = 0
     ) throws {
         try queue.write { db in
             try db.execute(
                 sql: """
                     INSERT INTO attachments
-                        (digest, cdn_key, cdn_number, size, content_type, key_bytes)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (digest, cdn_key, cdn_number, size, content_type, key_bytes,
+                         flags, waveform, duration_seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(digest) DO UPDATE SET
                         cdn_key = excluded.cdn_key,
                         cdn_number = excluded.cdn_number,
                         size = excluded.size,
                         content_type = excluded.content_type,
-                        key_bytes = excluded.key_bytes
+                        key_bytes = excluded.key_bytes,
+                        flags = excluded.flags,
+                        waveform = excluded.waveform,
+                        duration_seconds = excluded.duration_seconds
                     """,
                 arguments: [
                     digest,
@@ -70,6 +89,9 @@ public final class AttachmentTable: Sendable {
                     Int64(bitPattern: size),
                     contentType,
                     key,
+                    Int64(flags),
+                    waveform,
+                    durationSeconds,
                 ]
             )
         }
@@ -92,6 +114,9 @@ public final class AttachmentTable: Sendable {
             let contentType: String
             let keyBytes: Data
             let messageId: Int64?
+            let flags: Int64?
+            let waveform: Data?
+            let durationSeconds: Double?
 
             init(row: Row) {
                 digest = row["digest"]
@@ -101,6 +126,9 @@ public final class AttachmentTable: Sendable {
                 contentType = row["content_type"]
                 keyBytes = row["key_bytes"]
                 messageId = row["message_id"]
+                flags = row["flags"]
+                waveform = row["waveform"]
+                durationSeconds = row["duration_seconds"]
             }
         }
         let placeholders = digests.map { _ in "?" }.joined(separator: ",")
@@ -108,7 +136,8 @@ public final class AttachmentTable: Sendable {
             try AttachmentRow.fetchAll(
                 db,
                 sql: """
-                    SELECT digest, cdn_key, cdn_number, size, content_type, key_bytes, message_id
+                    SELECT digest, cdn_key, cdn_number, size, content_type, key_bytes, message_id,
+                           flags, waveform, duration_seconds
                     FROM attachments WHERE digest IN (\(placeholders))
                     """,
                 arguments: StatementArguments(digests)
@@ -122,7 +151,10 @@ public final class AttachmentTable: Sendable {
                 size: UInt64(bitPattern: row.size),
                 contentType: row.contentType,
                 key: row.keyBytes,
-                messageId: row.messageId
+                messageId: row.messageId,
+                flags: row.flags.map { UInt32(truncatingIfNeeded: $0) } ?? 0,
+                waveform: row.waveform ?? Data(),
+                durationSeconds: row.durationSeconds ?? 0
             )
         }
     }

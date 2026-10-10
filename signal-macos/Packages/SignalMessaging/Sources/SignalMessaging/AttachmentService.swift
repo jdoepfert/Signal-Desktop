@@ -27,6 +27,9 @@ public struct AttachmentPointer: Sendable, Equatable {
     /// message pointer. Incoming rows resolve the key from the attachments
     /// table by digest.
     public let key: Data
+    public let flags: UInt32
+    public let waveform: Data
+    public let durationSeconds: Double
 
     public init(
         cdnKey: String,
@@ -34,7 +37,10 @@ public struct AttachmentPointer: Sendable, Equatable {
         digest: Data,
         size: UInt64,
         contentType: String,
-        key: Data
+        key: Data,
+        flags: UInt32 = 0,
+        waveform: Data = Data(),
+        durationSeconds: Double = 0
     ) {
         self.cdnKey = cdnKey
         self.cdnNumber = cdnNumber
@@ -42,6 +48,9 @@ public struct AttachmentPointer: Sendable, Equatable {
         self.size = size
         self.contentType = contentType
         self.key = key
+        self.flags = flags
+        self.waveform = waveform
+        self.durationSeconds = durationSeconds
     }
 }
 
@@ -160,7 +169,13 @@ public final class AttachmentService: Sendable {
         self.attachments = attachments
     }
 
-    public func upload(_ bytes: Data, contentType: String) async throws -> AttachmentPointer {
+    public func upload(
+        _ bytes: Data,
+        contentType: String,
+        flags: UInt32 = 0,
+        waveform: Data = Data(),
+        durationSeconds: Double = 0
+    ) async throws -> AttachmentPointer {
         guard UInt64(bytes.count) <= Self.maxBytes else {
             throw AttachmentError.oversize
         }
@@ -177,7 +192,10 @@ public final class AttachmentService: Sendable {
             cdnNumber: form.cdn,
             size: UInt64(bytes.count),
             contentType: contentType,
-            key: keys
+            key: keys,
+            flags: flags,
+            waveform: waveform,
+            durationSeconds: durationSeconds
         )
         return AttachmentPointer(
             cdnKey: cdnKey,
@@ -185,7 +203,10 @@ public final class AttachmentService: Sendable {
             digest: digest,
             size: UInt64(bytes.count),
             contentType: contentType,
-            key: keys
+            key: keys,
+            flags: flags,
+            waveform: waveform,
+            durationSeconds: durationSeconds
         )
     }
 

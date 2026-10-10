@@ -159,6 +159,9 @@ public struct NewAttachment: Sendable, Equatable {
     public var size: UInt64
     public var contentType: String
     public var key: Data
+    public var flags: UInt32
+    public var waveform: Data
+    public var durationSeconds: Double
 
     public init(
         digest: Data,
@@ -166,7 +169,10 @@ public struct NewAttachment: Sendable, Equatable {
         cdnNumber: UInt32,
         size: UInt64,
         contentType: String,
-        key: Data
+        key: Data,
+        flags: UInt32 = 0,
+        waveform: Data = Data(),
+        durationSeconds: Double = 0
     ) {
         self.digest = digest
         self.cdnKey = cdnKey
@@ -174,6 +180,9 @@ public struct NewAttachment: Sendable, Equatable {
         self.size = size
         self.contentType = contentType
         self.key = key
+        self.flags = flags
+        self.waveform = waveform
+        self.durationSeconds = durationSeconds
     }
 }
 
@@ -341,14 +350,18 @@ public final class MessageStore: Sendable, MessageWriting {
             try db.execute(
                 sql: """
                     INSERT INTO attachments
-                        (digest, cdn_key, cdn_number, size, content_type, key_bytes)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (digest, cdn_key, cdn_number, size, content_type, key_bytes,
+                         flags, waveform, duration_seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(digest) DO UPDATE SET
                         cdn_key = excluded.cdn_key,
                         cdn_number = excluded.cdn_number,
                         size = excluded.size,
                         content_type = excluded.content_type,
-                        key_bytes = excluded.key_bytes
+                        key_bytes = excluded.key_bytes,
+                        flags = excluded.flags,
+                        waveform = excluded.waveform,
+                        duration_seconds = excluded.duration_seconds
                     """,
                 arguments: [
                     attachment.digest,
@@ -357,6 +370,9 @@ public final class MessageStore: Sendable, MessageWriting {
                     Int64(bitPattern: attachment.size),
                     attachment.contentType,
                     attachment.key,
+                    Int64(attachment.flags),
+                    attachment.waveform,
+                    attachment.durationSeconds,
                 ]
             )
         }
