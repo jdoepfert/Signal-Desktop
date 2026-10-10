@@ -51,15 +51,15 @@ that is not marked "skip" passes.
 
 | # | What to do | Expected | Result | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | If the Mac is already linked from an earlier checkpoint, press **Start over** (wipes this Mac's local data only) to return to the QR code. Then `Tools/build-app.sh`, `open dist/SignalMac.app --args --production`. On the phone: **Settings, Linked devices, Link new device**, scan the QR. | The app reaches the conversation list. It is **empty** at first (no conversations until a message arrives). | | |
-| 2 | Quit the app (Cmd-Q) and open it again. On the phone, send yourself a **Note to Self** ("b1 hello"), then reply to it **from the Mac**. | No QR code; the app opens straight to the list. The Note to Self conversation appears with the phone's text (1:1 still green), and the Mac's reply shows up in the phone's Note to Self thread. | | |
-| 3 | On the phone, **create a group** with you and one real contact, and send the first message there ("b3 hello group"). Watch the Mac, then **reply from the Mac**, then ask the contact to reply. | A thread titled **Group \<8 hex chars\>** appears on the Mac with the phone's message. The Mac's reply arrives on the phone **and** the contact's phone. The contact's reply arrives on the Mac with their **name** as the sender label. No crash, no placeholder for any of the three text messages. | | |
-| 4 | In a 1:1 conversation with the contact: **attach a photo from the Mac** (Attach button, pick an image; add a caption), confirm on the phone — then have the contact **send a photo back**. | The phone receives the Mac's photo with its caption. The Mac renders the contact's photo **inline** in the thread. | | |
-| 5 | In the same 1:1 conversation, **attach a non-image file from the Mac** (e.g. a PDF or text file). | The phone receives the file. (The Mac side shows it as a file row with type and size.) | | |
-| 6 | Compare the Mac's conversation list and sender labels against the phone's contact list. | Titles and sender labels show the **same names as the phone** (raw account id only for a contact with no reachable profile and no synced name — not a failure). | | |
-| 7 | Unlink the Mac from the phone (**Settings, Linked devices, Mac, Unlink**), then press **Start over** on the Mac and link again (line 1). | Within a minute the Mac shows "This Mac was unlinked from your phone" with a **Start over** button, and stops reconnecting. After Start over a fresh QR appears and the relink reaches the conversation list. | | |
-| 8 | Search the log for personal data: `grep -E '\+[0-9]{7}\|[0-9a-f]{8}-[0-9a-f]{4}-' ~/Library/Logs/SignalMac/signal-mac.log` and skim the file. | The grep prints nothing. The log has no phone numbers, names, message text, keys, group titles, member lists, file bytes or avatar bytes — only status codes and error reasons. | | |
-| 9 | Look at the footer at the bottom of the conversation view and tap it. | The footer shows `version (commit)` matching this build (`git rev-parse --short HEAD` in the checkout you built from); tapping it shows Version, Commit and Built date, and the date is today. | | |
+| 1 | If the Mac is already linked from an earlier checkpoint, press **Start over** (wipes this Mac's local data only) to return to the QR code. Then `Tools/build-app.sh`, `open dist/SignalMac.app --args --production`. On the phone: **Settings, Linked devices, Link new device**, scan the QR. | The app reaches the conversation list. It is **empty** at first (no conversations until a message arrives). | PASS | Owner report: all OK. |
+| 2 | Quit the app (Cmd-Q) and open it again. On the phone, send yourself a **Note to Self** ("b1 hello"), then reply to it **from the Mac**. | No QR code; the app opens straight to the list. The Note to Self conversation appears with the phone's text (1:1 still green), and the Mac's reply shows up in the phone's Note to Self thread. | PASS | Owner report: all OK. |
+| 3 | On the phone, **create a group** with you and one real contact, and send the first message there ("b3 hello group"). Ask the contact to send a message in the group too; wait until it appears on the Mac. Then **reply from the Mac**, and ask the contact to reply once more. | A thread titled **Group \<8 hex chars\>** appears on the Mac with the phone's text. The contact's first message appears with their **name** as sender. The Mac's reply arrives on both the phone and the contact's phone; the contact's next reply appears on the Mac. No crash, no placeholder for any text message. | PARTIAL | Owner report: Mac send displays `Cannot send to group, group has no members yet`, although the group has another member. Owner wonders whether that member may no longer be active on Signal; unconfirmed. Group titles appear as IDs rather than names (see line 6). |
+| 4 | In a 1:1 conversation with the contact: **attach a photo from the Mac** (Attach button, pick an image; add a caption), confirm on the phone — then have the contact **send a photo back**. | The phone receives the Mac's photo with its caption. The Mac renders the contact's photo **inline** in the thread. | FAIL | Owner report: photo is not rendered inline; displayed as a file box: `File image/jpeg 229 KB`. Direction not specified. |
+| 5 | In the same 1:1 conversation, **attach a non-image file from the Mac** (e.g. a PDF or text file). | The phone receives the file. (The Mac side shows it as a file row with type and size.) | FAIL | Owner report: clicking Attach shows red error text `transferFailed(status: -1)`. |
+| 6 | Compare the Mac's conversation list and sender labels against the phone's contact list. | Titles and sender labels show the **same names as the phone** (raw account id only for a contact with no reachable profile and no synced name — not a failure). | PASS | Owner report: passes for contact names; group titles show IDs, not names. |
+| 7 | Unlink the Mac from the phone (**Settings, Linked devices, Mac, Unlink**), then press **Start over** on the Mac and link again (line 1). | Within a minute the Mac shows "This Mac was unlinked from your phone" with a **Start over** button, and stops reconnecting. After Start over a fresh QR appears and the relink reaches the conversation list. | NOT TESTED | Owner report: not tested yet. |
+| 8 | Search the log for personal data: `grep -E '\+[0-9]{7}\|[0-9a-f]{8}-[0-9a-f]{4}-' ~/Library/Logs/SignalMac/signal-mac.log` and skim the file. | The grep prints nothing. The log has no phone numbers, names, message text, keys, group titles, member lists, file bytes or avatar bytes — only status codes and error reasons. | PASS | Owner report: passes. |
+| 9 | Look at the footer at the bottom of the conversation view and tap it. | The footer shows `version (commit)` matching this build (`git rev-parse --short HEAD` in the checkout you built from); tapping it shows Version, Commit and Built date, and the date is today. | PASS | Owner report: passes. |
 
 Notes on specific lines:
 
@@ -73,6 +73,11 @@ Notes on specific lines:
   message, so allow a few seconds after the phone sends it. If nothing
   appears, send the log. A thread titled `Group <hex>` with the right
   messages is a pass — the title placeholder is expected.
+- **Line 3 says "Cannot send: The group has no other members yet":** the
+  current dogfood build learns recipient ACIs from authenticated group
+  messages. Have the contact send a message to the group and wait for it to
+  appear on the Mac, then retry the Mac reply. If the error remains after
+  their message appears, send the log.
 - **Line 3 shows a placeholder instead of a group text:** allow a retry — a
   message arriving before its sender-key material renders only after the
   retry cap resolves it. If the placeholder persists, send the log.
@@ -100,7 +105,9 @@ Notes on specific lines:
 
 ## Result
 
-- Date / macOS version / app build: TBD (owner fills in after the live run)
-- Lines passed: TBD
-- Lines failed (with the number of the fix round that addressed each): TBD
-- Overall: TBD — Milestone B checkpoint not yet run
+- Date / macOS version / app build: not provided by owner
+- Lines passed: 1, 2, 6 (contact names), 8, 9
+- Lines partial: 3 (Mac group send did not complete successfully; roster state and other member's account status unconfirmed)
+- Lines failed: 4 (photo displayed as file row), 5 (Attach reports `transferFailed(status: -1)`)
+- Lines not tested: 7
+- Overall: FAIL — Milestone B checkpoint remains open; owner feedback recorded, fixes not attempted per instruction
