@@ -39,6 +39,9 @@ func runReceiveTests() async {
     await testSyncContactsPersistAsSyncRow()
     await testGroupMessageMapsToThread()
     await testSenderKeyMessageLandsInGroupThread()
+    await testPhoneShapedSkdmThenGroupMessage()
+    await testSkdmWithDataMessageInSameContent()
+    await testRawSkdmPlaintextIsRejected()
     await testSentSyncLandsInDestinationThread()
     await testSentSyncGroupBootstrapsRoster()
     testGroupRosterAddsSendersAtSameRevision()
@@ -382,8 +385,8 @@ private func testGroupMessageMapsToThread() async {
     }
 }
 
-// Full sender-key path: SKDM arrives sealed (no row, session established),
-// then the sender-key ciphertext decrypts into the group thread.
+// Full sender-key path, phone-shaped: SKDM inside Content (no row), then
+// a sender-key ciphertext decrypts into the group thread.
 private func testSenderKeyMessageLandsInGroupThread() async {
     do {
         let (rig, peer, _) = try bobAndPeer()
@@ -392,26 +395,6 @@ private func testSenderKeyMessageLandsInGroupThread() async {
         let masterKey = Data(repeating: 0x0D, count: 32)
         let distributionId = UUID()
         let ts: UInt64 = 1_700_000_500_000
-        func sealedGroupEnvelope(_ message: CiphertextMessage, timestamp: UInt64) throws -> Data {
-            let usmc = try UnidentifiedSenderMessageContent(
-                message,
-                from: peer.senderCertificate(root: root, server: server),
-                contentHint: .default,
-                groupId: []
-            )
-            let sealed = try LibSignalClient.sealedSenderEncrypt(
-                usmc,
-                for: rig.address,
-                identityStore: peer.store,
-                context: NullContext()
-            )
-            return try wrapInEnvelope(
-                type: .unidentifiedSender,
-                content: sealed,
-                destination: rig.ourAci,
-                clientTimestamp: timestamp
-            )
-        }
         let skdm = try SenderKeyDistributionMessage(
             from: peer.address,
             distributionId: distributionId,
@@ -436,22 +419,21 @@ private func testSenderKeyMessageLandsInGroupThread() async {
         )
         let receiver = try rig.receiver(trustRoots: [root.publicKey])
         let acks = AckCounter()
-        // SKDM travels sealed (inner session ciphertext, like 1:1 sends).
-        let skdmSealed = try sealedSenderEncrypt(
-            skdm.serialize(),
-            from: peer.senderCertificate(root: root, server: server),
-            to: rig.address,
-            senderStore: peer.store,
-            context: NullContext()
-        )
-        await receiver.process(acks.envelope(try wrapInEnvelope(
-            type: .unidentifiedSender,
-            content: skdmSealed,
-            destination: rig.ourAci,
-            clientTimestamp: ts
-        )))
+        await receiver.process(acks.envelope(
+            try PhoneEnvelopes.skdmContent(peer: peer, rig: rig, skdm: skdm, timestamp: ts)
+        ))
         let afterSkdm = try rig.messages.all()
-        await receiver.process(acks.envelope(try sealedGroupEnvelope(ciphertext, timestamp: ts + 1)))
+        await receiver.process(acks.envelope(
+            try PhoneEnvelopes.senderKeyMessage(
+                peer: peer,
+                rig: rig,
+                root: root,
+                server: server,
+                ciphertext: ciphertext,
+                groupId: masterKey,
+                timestamp: ts + 1
+            )
+        ))
         let stored = try rig.messages.all().last
         let groupTable = GroupStateTable(queue: rig.db.queue)
         let state = try groupTable.load(masterKey: masterKey)
@@ -469,6 +451,197 @@ private func testSenderKeyMessageLandsInGroupThread() async {
         )
     } catch {
         check("ReceiveTests.testSenderKeyMessageLandsInGroupThread", false, "\(error)")
+    }
+}
+
+// Review Focus: a phone-shaped SKDM followed by a phone-shaped sender-key
+// message decrypts into the group thread; both envelopes acked exactly once.
+private func testPhoneShapedSkdmThenGroupMessage() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let root = IdentityKeyPair.generate()
+        let server = IdentityKeyPair.generate()
+        let masterKey = Data(repeating: 0x0E, count: 32)
+        let distributionId = UUID()
+        let ts: UInt64 = 1_700_000_510_000
+        let skdm = try SenderKeyDistributionMessage(
+            from: peer.address,
+            distributionId: distributionId,
+            store: peer.store,
+            context: NullContext()
+        )
+        var groupV2 = SignalServiceProtos_GroupContextV2()
+        groupV2.masterKey = masterKey
+        groupV2.revision = 1
+        var groupMessage = SignalServiceProtos_DataMessage()
+        groupMessage.body = "phone group hi"
+        groupMessage.timestamp = ts
+        groupMessage.groupV2 = groupV2
+        var content = SignalServiceProtos_Content()
+        content.dataMessage = groupMessage
+        let ciphertext = try groupEncrypt(
+            Padding.pad(try content.serializedData()),
+            from: peer.address,
+            distributionId: distributionId,
+            store: peer.store,
+            context: NullContext()
+        )
+        let receiver = try rig.receiver(trustRoots: [root.publicKey])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try PhoneEnvelopes.skdmContent(peer: peer, rig: rig, skdm: skdm, timestamp: ts)
+        ))
+        let afterSkdm = try rig.messages.all()
+        await receiver.process(acks.envelope(
+            try PhoneEnvelopes.senderKeyMessage(
+                peer: peer,
+                rig: rig,
+                root: root,
+                server: server,
+                ciphertext: ciphertext,
+                groupId: masterKey,
+                timestamp: ts + 1
+            )
+        ))
+        let stored = try rig.messages.all().last
+        try checkT(
+            "ReceiveTests.testPhoneShapedSkdmThenGroupMessage",
+            afterSkdm.isEmpty
+                && stored?.kind == "text"
+                && stored?.body == "phone group hi"
+                && stored?.conversationId == "group:" + masterKey.map({ String(format: "%02x", $0) }).joined()
+                && acks.allExactlyOnce && acks.total == 2,
+            "stored=\(String(describing: stored)) acks=\(acks.total)"
+        )
+    } catch {
+        check("ReceiveTests.testPhoneShapedSkdmThenGroupMessage", false, "\(error)")
+    }
+}
+
+// One Content carrying both an SKDM and a 1:1 dataMessage: the SKDM is
+// processed AND the text is stored. Proved by a follow-up sender-key
+// message that only decrypts if the bundled SKDM took effect.
+private func testSkdmWithDataMessageInSameContent() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let root = IdentityKeyPair.generate()
+        let server = IdentityKeyPair.generate()
+        let masterKey = Data(repeating: 0x0F, count: 32)
+        let distributionId = UUID()
+        let ts: UInt64 = 1_700_000_520_000
+        let skdm = try SenderKeyDistributionMessage(
+            from: peer.address,
+            distributionId: distributionId,
+            store: peer.store,
+            context: NullContext()
+        )
+        var groupV2 = SignalServiceProtos_GroupContextV2()
+        groupV2.masterKey = masterKey
+        groupV2.revision = 1
+        var groupMessage = SignalServiceProtos_DataMessage()
+        groupMessage.body = "bundled text"
+        groupMessage.timestamp = ts
+        groupMessage.groupV2 = groupV2
+        var followup = SignalServiceProtos_DataMessage()
+        followup.body = "after bundled skdm"
+        followup.timestamp = ts + 1
+        followup.groupV2 = groupV2
+        var followupContent = SignalServiceProtos_Content()
+        followupContent.dataMessage = followup
+        let ciphertext = try groupEncrypt(
+            Padding.pad(try followupContent.serializedData()),
+            from: peer.address,
+            distributionId: distributionId,
+            store: peer.store,
+            context: NullContext()
+        )
+        let receiver = try rig.receiver(trustRoots: [root.publicKey])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try PhoneEnvelopes.skdmWithDataMessage(
+                peer: peer,
+                rig: rig,
+                skdm: skdm,
+                dataMessage: groupMessage,
+                timestamp: ts
+            )
+        ))
+        await receiver.process(acks.envelope(
+            try PhoneEnvelopes.senderKeyMessage(
+                peer: peer,
+                rig: rig,
+                root: root,
+                server: server,
+                ciphertext: ciphertext,
+                groupId: masterKey,
+                timestamp: ts + 2
+            )
+        ))
+        let stored = try rig.messages.all()
+        try checkT(
+            "ReceiveTests.testSkdmWithDataMessageInSameContent",
+            stored.count == 2
+                && stored.first?.kind == "text"
+                && stored.first?.body == "bundled text"
+                && stored.last?.body == "after bundled skdm"
+                && stored.last?.conversationId == "group:" + masterKey.map({ String(format: "%02x", $0) }).joined()
+                && acks.allExactlyOnce,
+            "stored=\(String(describing: stored))"
+        )
+    } catch {
+        check("ReceiveTests.testSkdmWithDataMessageInSameContent", false, "\(error)")
+    }
+}
+
+// The old shape (raw SKDM bytes as session plaintext) is no longer a
+// distribution: nothing is processed and no row appears, proving the raw
+// fallback is gone. (It stays queued like any bad-padding envelope per
+// testPaddingFailureKeepsNothingAndDoesNotCrash, rather than an immediate
+// placeholder — see the ledger ruling.)
+private func testRawSkdmPlaintextIsRejected() async {
+    do {
+        let (rig, peer, _) = try bobAndPeer()
+        let ts: UInt64 = 1_700_000_530_000
+        // Random SKDM bytes whose last byte is ordinary, so unpadding
+        // deterministically fails instead of accidentally succeeding.
+        var skdm: SenderKeyDistributionMessage?
+        for _ in 0..<20 {
+            let candidate = try SenderKeyDistributionMessage(
+                from: peer.address,
+                distributionId: UUID(),
+                store: peer.store,
+                context: NullContext()
+            )
+            if let last = candidate.serialize().last, last != 0x00 && last != 0x80 {
+                skdm = candidate
+                break
+            }
+        }
+        guard let skdm else {
+            check("ReceiveTests.testRawSkdmPlaintextIsRejected", false, "no clean-ending SKDM")
+            return
+        }
+        let ciphertext = try peer.encryptRaw(padded: skdm.serialize(), to: rig.address)
+        let receiver = try rig.receiver(trustRoots: [])
+        let acks = AckCounter()
+        await receiver.process(acks.envelope(
+            try wrapInEnvelope(
+                type: .prekeyMessage,
+                content: ciphertext.serialize(),
+                source: (peer.aci, peer.deviceId),
+                destination: rig.ourAci,
+                clientTimestamp: ts
+            )
+        ))
+        try checkT(
+            "ReceiveTests.testRawSkdmPlaintextIsRejected",
+            (try rig.messages.all()).isEmpty
+                && (try rig.unprocessed.count()) == 1
+                && acks.total == 1,
+            "rows=\(try rig.messages.all().count) unprocessed=\(try rig.unprocessed.count())"
+        )
+    } catch {
+        check("ReceiveTests.testRawSkdmPlaintextIsRejected", false, "\(error)")
     }
 }
 

@@ -92,14 +92,15 @@ public func sealedSenderDecryptUnknownSender(
 }
 
 /// Like `sealedSenderDecryptUnknownSender`, additionally reporting the
-/// sender certificate's device id.
+/// sender certificate's device id and the sealed message type (so the
+/// receiver routes sender-key payloads without probing plaintext shapes).
 public func sealedSenderDecryptWithDevice(
     _ envelope: Data,
     to recipient: ProtocolAddress,
     recipientStore: any SignalProtocolStore,
     trustRoots: [PublicKey],
     context: StoreContext
-) throws -> (plaintext: Data, senderAci: String, senderDeviceId: UInt32) {
+) throws -> (type: CiphertextMessage.MessageType, plaintext: Data, senderAci: String, senderDeviceId: UInt32) {
     let content = try UnidentifiedSenderMessageContent(
         message: envelope,
         identityStore: recipientStore,
@@ -111,14 +112,14 @@ public func sealedSenderDecryptWithDevice(
         name: senderAci,
         deviceId: UInt32(content.senderCertificate.sender.deviceId)
     )
-    let plaintext = try decryptInnerContent(
+    let (type, plaintext) = try decryptInnerContent(
         content,
         from: sender,
         to: recipient,
         recipientStore: recipientStore,
         context: context
     )
-    return (plaintext, senderAci, sender.deviceId)
+    return (type, plaintext, senderAci, sender.deviceId)
 }
 
 /// Decrypts a sealed-sender envelope, verifying the sender certificate
@@ -150,10 +151,10 @@ private func decryptInnerContent(
     to recipient: ProtocolAddress,
     recipientStore: any SignalProtocolStore,
     context: StoreContext
-) throws -> Data {
+) throws -> (CiphertextMessage.MessageType, Data) {
     switch content.messageType {
     case .preKey:
-        return try signalDecryptPreKey(
+        return try (.preKey, signalDecryptPreKey(
             message: try PreKeySignalMessage(bytes: content.contents),
             from: sender,
             localAddress: recipient,
@@ -163,25 +164,24 @@ private func decryptInnerContent(
             signedPreKeyStore: recipientStore,
             kyberPreKeyStore: recipientStore,
             context: context
-        )
+        ))
     case .whisper:
-        return try signalDecrypt(
+        return try (.whisper, signalDecrypt(
             message: try SignalMessage(bytes: content.contents),
             from: sender,
             to: recipient,
             sessionStore: recipientStore,
             identityStore: recipientStore,
             context: context
-        )
+        ))
     case .plaintext:
         // Decryption-error receipts travel as plaintext content inside a
         // sealed-sender envelope; the body is the (padded) Content bytes.
-        return try PlaintextContent(bytes: content.contents).body
+        return try (.plaintext, PlaintextContent(bytes: content.contents).body)
     case .senderKey:
-        // Sender-key payloads (SKDM distributions and group ciphertext)
-        // decrypt in the envelope fallback (`decodeSenderKey`), which
-        // needs the raw bytes; pass them through untouched.
-        return content.contents
+        // Sender-key payloads (group ciphertext) decrypt in the envelope
+        // receiver, which routes on the type; pass them through untouched.
+        return (.senderKey, content.contents)
     default:
         throw SealedSenderHelperError.unsupportedMessageType
     }

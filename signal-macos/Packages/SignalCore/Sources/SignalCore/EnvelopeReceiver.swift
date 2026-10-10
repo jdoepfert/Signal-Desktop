@@ -419,9 +419,37 @@ public actor EnvelopeReceiver {
                 trustRoots: trustRoots,
                 context: context
             )
-            padded = result.plaintext
             senderAci = result.senderAci.lowercased()
             senderDevice = result.senderDeviceId
+            let senderAddress = try ProtocolAddress(name: senderAci, deviceId: result.senderDeviceId)
+            let inbound = InboundContext(
+                senderAci: senderAci,
+                senderDevice: senderDevice,
+                ourAci: ourAci,
+                clientTimestamp: envelope.clientTimestamp,
+                envelopeHash: Data(SHA256.hash(data: bytes))
+            )
+            // Sender-key payloads are group ciphertext, never padded
+            // Content: decrypt first, then parse. Everything else arrives
+            // as padded Content. The sealed layer's type decides — never
+            // probe the plaintext shape.
+            if result.type == .senderKey {
+                let decrypted = try groupDecrypt(
+                    result.plaintext,
+                    from: senderAddress,
+                    store: store,
+                    context: NullContext()
+                )
+                let plaintext = try Padding.unpad(decrypted)
+                let content: SignalServiceProtos_Content
+                do {
+                    content = try SignalServiceProtos_Content(serializedBytes: plaintext)
+                } catch {
+                    throw EnvelopeError.invalidContent
+                }
+                return try Self.finishGroupContent(content, from: senderAddress, inbound: inbound, store: store)
+            }
+            padded = result.plaintext
         case .plaintextContent:
             // Decryption-error receipts only (never user content).
             padded = try PlaintextContent(bytes: envelope.content).body
@@ -438,53 +466,50 @@ public actor EnvelopeReceiver {
             clientTimestamp: envelope.clientTimestamp,
             envelopeHash: Data(SHA256.hash(data: bytes))
         )
+        let plaintext = try Padding.unpad(padded)
+        let content: SignalServiceProtos_Content
         do {
-            let plaintext = try Padding.unpad(padded)
-            let content: SignalServiceProtos_Content
-            do {
-                content = try SignalServiceProtos_Content(serializedBytes: plaintext)
-            } catch {
-                throw EnvelopeError.invalidContent
-            }
-            return DecodedEnvelope(
-                message: ContentMapping.message(from: content, context: inbound),
-                profileKey: ContentMapping.profileKey(from: content, context: inbound)
-            )
-        } catch let firstError {
-            // Sender-key fallback on the RAW sealed plaintext (never
-            // unpadded: it already is the sender-key ciphertext, not padded
-            // content). The original error rethrows when the fallback
-            // misses, so 1:1 failure mapping is unchanged.
-            if let senderDevice,
-               let address = try? ProtocolAddress(name: senderAci, deviceId: senderDevice),
-               let groupMessage = try? self.decodeSenderKey(padded, from: address, inbound: inbound)
-            {
-                return groupMessage
-            }
-            throw firstError
+            content = try SignalServiceProtos_Content(serializedBytes: plaintext)
+        } catch {
+            throw EnvelopeError.invalidContent
         }
+        if let senderDevice,
+           let address = try? ProtocolAddress(name: senderAci, deviceId: senderDevice)
+        {
+            try Self.processSkdmField(content, from: address, store: store)
+        }
+        return DecodedEnvelope(
+            message: ContentMapping.message(from: content, context: inbound),
+            profileKey: ContentMapping.profileKey(from: content, context: inbound)
+        )
     }
 
-    /// Sender-key (group) payloads: SKDM processes into the store with no
-    /// row (acked like a delivery receipt); message ciphertext decrypts
-    /// into the normal mapping path. Nil when the bytes are neither.
-    private func decodeSenderKey(
-        _ bytes: Data,
+    /// Processes an SKDM carried inside `Content` (Desktop handles it
+    /// before mapping the message, `MessageReceiver.preload.ts:1515`).
+    /// Runs inside the decrypt transaction. No-op when the field is absent.
+    private static func processSkdmField(
+        _ content: SignalServiceProtos_Content,
         from address: ProtocolAddress,
-        inbound: InboundContext
-    ) throws -> DecodedEnvelope? {
-        let context = NullContext()
-        if let skdm = try? SenderKeyDistributionMessage(bytes: bytes) {
-            try processSenderKeyDistributionMessage(skdm, from: address, store: store, context: context)
-            return DecodedEnvelope(message: nil, profileKey: nil)
-        }
-        guard
-            let decrypted = try? groupDecrypt(bytes, from: address, store: store, context: context),
-            let plaintext = try? Padding.unpad(decrypted),
-            let content = try? SignalServiceProtos_Content(serializedBytes: plaintext)
+        store: GRDBProtocolStore
+    ) throws {
+        guard content.hasSenderKeyDistributionMessage,
+              !content.senderKeyDistributionMessage.isEmpty
         else {
-            return nil
+            return
         }
+        let skdm = try SenderKeyDistributionMessage(bytes: content.senderKeyDistributionMessage)
+        try processSenderKeyDistributionMessage(skdm, from: address, store: store, context: NullContext())
+    }
+
+    /// Maps a Content decoded from sender-key ciphertext: same SKDM-first
+    /// handling as the session path, then the normal mapping.
+    private static func finishGroupContent(
+        _ content: SignalServiceProtos_Content,
+        from address: ProtocolAddress,
+        inbound: InboundContext,
+        store: GRDBProtocolStore
+    ) throws -> DecodedEnvelope {
+        try processSkdmField(content, from: address, store: store)
         return DecodedEnvelope(
             message: ContentMapping.message(from: content, context: inbound),
             profileKey: ContentMapping.profileKey(from: content, context: inbound)
