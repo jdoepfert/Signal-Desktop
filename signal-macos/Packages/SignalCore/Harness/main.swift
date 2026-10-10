@@ -135,6 +135,10 @@ run("PaddingTests") {
     runContentVectorTests()
 }
 
+run("VoiceTests") {
+    runVoiceTests()
+}
+
 run("VectorTests") {
     check(
         "VectorTests.testLoadsAll",
