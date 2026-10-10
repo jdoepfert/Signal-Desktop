@@ -109,6 +109,21 @@ public final class GroupManager: @unchecked Sendable {
     }
 
     @discardableResult
+    public func mergeFetchedGroup(
+        masterKey: Data,
+        revision: UInt32,
+        members: [String]
+    ) throws -> Bool {
+        // Server state never downgrades the roster: a stored revision at or
+        // past the fetched one wins (same gate as `applyMembership`).
+        if let existing = try groups.load(masterKey: masterKey), existing.revision >= revision {
+            return false
+        }
+        try joinKnownGroup(masterKey: masterKey, revision: revision, members: members)
+        return true
+    }
+
+    @discardableResult
     public func sendTextToGroup(_ text: String, group masterKey: Data) async throws -> UInt64 {
         guard let state = try groups.load(masterKey: masterKey) else {
             throw GroupSendError.unknownGroup
@@ -247,7 +262,7 @@ public final class GroupManager: @unchecked Sendable {
                     ),
                     to: memberAci
                 )
-                lock.withLock { distributed.insert(key) }
+                lock.withLock { _ = distributed.insert(key) }
             }
         }
     }

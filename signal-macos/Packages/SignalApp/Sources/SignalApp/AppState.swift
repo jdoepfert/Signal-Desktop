@@ -282,7 +282,6 @@ public final class AppState: ObservableObject {
 
     public func send(text: String) async {
         guard
-            let stack,
             let selection,
             !text.isEmpty
         else {
@@ -335,7 +334,21 @@ public final class AppState: ObservableObject {
             return
         }
         do {
-            let timestamp = try await stack.groups.sendTextToGroup(text, group: masterKey)
+            let timestamp: UInt64
+            do {
+                timestamp = try await stack.groups.sendTextToGroup(text, group: masterKey)
+            } catch let groupError as GroupSendError
+                where groupError == .unknownGroup || groupError == .noOtherMembers
+            {
+                // The roster is empty or unknown locally: fetch the server
+                // state first, then send once against the fetched roster.
+                guard await refreshGroupFromServer(masterKey: masterKey) else {
+                    refreshConversations()
+                    await reloadThread()
+                    return
+                }
+                timestamp = try await stack.groups.sendTextToGroup(text, group: masterKey)
+            }
             let message = NewMessage(
                 senderAci: linkedAci.lowercased(),
                 body: text,
@@ -354,6 +367,68 @@ public final class AppState: ObservableObject {
         }
         refreshConversations()
         await reloadThread()
+    }
+
+    /// Server roster refresh before a group send: credential chain over the
+    /// chat socket, storage GET, revision-gated merge, title store. Returns
+    /// whether a retry is worthwhile. Every failure sets the banner and
+    /// keeps the thread — the send path owns no throw here.
+    private func refreshGroupFromServer(masterKey: Data) async -> Bool {
+        guard let stack, let linkedAci else {
+            return false
+        }
+        let chat = stack.chat
+        do {
+            let range = GroupStateFetch.credentialRange()
+            let listed = try await GroupStateFetch.fetchCredentials(
+                chatSend: { request in try await chat.send(request) },
+                startSeconds: range.startSeconds,
+                endSeconds: range.endSeconds
+            )
+            let presented = try GroupStateFetch.makeCredentials(
+                masterKey: masterKey,
+                serverPublicParamsBase64: GroupStateFetch.serverPublicParamsBase64(
+                    environment: environment
+                ),
+                aci: linkedAci,
+                pni: listed.pni,
+                todaySeconds: range.startSeconds,
+                entries: listed.entries
+            )
+            let fetched = try await GroupStateFetch.fetch(
+                masterKey: masterKey,
+                environment: environment,
+                http: Self.storageHttp(),
+                credentials: presented
+            )
+            // Revision-gated: a stale fetch never downgrades the roster.
+            // The server lists inactive members too, so they stay.
+            _ = try stack.groups.mergeFetchedGroup(
+                masterKey: masterKey,
+                revision: fetched.revision,
+                members: fetched.members
+            )
+            if let title = fetched.title {
+                try stack.conversations.setGroupTitle(masterKey: masterKey, title: title)
+            }
+            return true
+        } catch GroupFetchError.transferFailed(status: 403) {
+            self.error = "Cannot send: this group is unavailable (you may have been removed)."
+            return false
+        } catch {
+            self.error = "Cannot send: could not refresh the group (\(ErrorReason.describe(error)))."
+            return false
+        }
+    }
+
+    private static func storageHttp() -> GroupStateFetch.HttpSend {
+        { request in
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw GroupFetchError.transferFailed(status: -1)
+            }
+            return (data, httpResponse)
+        }
     }
 
     /// Attach button: picks one file, uploads it, and sends it with the

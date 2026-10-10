@@ -13,6 +13,56 @@ private let groupBob = "6838237D-02F6-4098-B110-698253D15961"
 private let groupCarol = "8e7b8c8d-9e8f-4a4b-8c8d-9e8f8a8b8c8d"
 private let groupDave = "7c6b5a4d-3c2b-4a19-8d7c-6e5d4c3b2a19"
 
+/// Canned `GroupResponse` with REAL zkgroup encryption under `masterKey`
+/// (built with SwiftProtobuf, never hand bytes): `memberAcis` encrypt as
+/// ACI members, `badEntries` land as undecryptable userIDs, `title`
+/// encrypts as the title blob when non-nil.
+private func groupFetchFixture(
+    masterKey: Data,
+    memberAcis: [String],
+    badEntries: [Data] = [],
+    title: String?
+) throws -> Data {
+    let secretParams = try GroupSecretParams.deriveFromMasterKey(
+        groupMasterKey: GroupMasterKey(contents: masterKey)
+    )
+    let cipher = ClientZkGroupCipher(groupSecretParams: secretParams)
+    var members = [SignalServiceProtos_Member]()
+    for aci in memberAcis {
+        let userId = Aci(fromUUID: UUID(uuidString: aci)!)
+        let profileKey = try ProfileKey(contents: Data(repeating: 0xA5, count: 32))
+        var member = SignalServiceProtos_Member()
+        member.userID = try cipher.encrypt(userId).serialize()
+        member.profileKey = try cipher.encryptProfileKey(profileKey: profileKey, userId: userId).serialize()
+        members.append(member)
+    }
+    for bad in badEntries {
+        var member = SignalServiceProtos_Member()
+        member.userID = bad
+        members.append(member)
+    }
+    var group = SignalServiceProtos_Group()
+    group.version = 9
+    group.members = members
+    if let title {
+        var blob = SignalServiceProtos_GroupAttributeBlob()
+        blob.title = title
+        group.title = try cipher.encryptBlob(plaintext: try blob.serializedData())
+    }
+    var response = SignalServiceProtos_GroupResponse()
+    response.group = group
+    return try response.serializedData()
+}
+
+private func groupFetchHttp(status: Int, body: Data) -> GroupStateFetch.HttpSend {
+    { request in
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil
+        )!
+        return (body, response)
+    }
+}
+
 /// Scripted group transport: captures sealed per-device envelopes,
 /// optionally failing one send with a membership change.
 final class FakeGroupSender: GroupDistributionSender, @unchecked Sendable {
@@ -413,6 +463,180 @@ func runGroupTests() async {
             )
         } catch {
             check("MessagingTests.testGroupChangeWrapperDecodes", false, "\(error)")
+        }
+
+        // Credential-list shape: the chat socket's group-credential JSON
+        // parses to dated credential entries plus our PNI.
+        do {
+            final class ChatPaths: @unchecked Sendable {
+                var paths = [String]()
+            }
+            let seen = ChatPaths()
+            let chatSend: LiveTransport.AuthenticatedSend = { request in
+                seen.paths.append(request.pathAndQuery)
+                let json = try JSONSerialization.data(withJSONObject: [
+                    "pni": "EA3A5E42-9B2A-4B9A-8C1D-2E3F4A5B6C7D",
+                    "credentials": [
+                        ["credential": Data("cred-today".utf8).base64EncodedString(), "redemptionTime": 1_747_000_000],
+                        ["credential": Data("cred-tomorrow".utf8).base64EncodedString(), "redemptionTime": 1_747_086_400],
+                    ],
+                    "callLinkAuthCredentials": [],
+                    "futureUnknownField": true,
+                ])
+                return (200, json)
+            }
+            let fetched = try await GroupStateFetch.fetchCredentials(
+                chatSend: chatSend, startSeconds: 1_747_000_000, endSeconds: 1_747_086_400
+            )
+            check(
+                "MessagingTests.testGroupCredentialsShape",
+                seen.paths == ["/v1/certificate/auth/group?redemptionStartSeconds=1747000000&redemptionEndSeconds=1747086400&v101=true&zkcCredential=true"]
+                    && fetched.pni == "EA3A5E42-9B2A-4B9A-8C1D-2E3F4A5B6C7D"
+                    && fetched.entries.count == 2
+                    && fetched.entries[0].redemptionTime == 1_747_000_000
+                    && fetched.entries[0].credential == Data("cred-today".utf8),
+                "\(seen.paths)"
+            )
+        } catch {
+            check("MessagingTests.testGroupCredentialsShape", false, "\(error)")
+        }
+
+        // Server fetch imports roster + revision + title, then merges and
+        // stores the title for conversationTitle.
+        do {
+            let fetchKey = Data(repeating: 0x0B, count: 32)
+            let body = try groupFetchFixture(
+                masterKey: fetchKey,
+                memberAcis: [groupAlice, groupBob],
+                title: "Hiking Club"
+            )
+            final class SeenAuth: @unchecked Sendable {
+                var url = ""
+                var auth = ""
+            }
+            let seen = SeenAuth()
+            let http: GroupStateFetch.HttpSend = { request in
+                seen.url = request.url?.absoluteString ?? ""
+                seen.auth = request.value(forHTTPHeaderField: "Authorization") ?? ""
+                let response = HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+                )!
+                return (body, response)
+            }
+            let fetched = try await GroupStateFetch.fetch(
+                masterKey: fetchKey,
+                environment: .staging,
+                http: http,
+                credentials: GroupFetchCredentials(presentationHex: "00")
+            )
+            let applied = try manager.mergeFetchedGroup(
+                masterKey: fetchKey, revision: fetched.revision, members: fetched.members
+            )
+            let conversations = ConversationStore(queue: db.queue)
+            // The thread exists before any send (the message layer made
+            // it); titles attach to it, never create it.
+            _ = try conversations.conversation(forGroup: fetchKey)
+            if let title = fetched.title {
+                try conversations.setGroupTitle(masterKey: fetchKey, title: title)
+            }
+            let stored = try groups.load(masterKey: fetchKey)
+            let thread = try conversations.conversation(forGroup: fetchKey)
+            check(
+                "MessagingTests.testGroupFetchImportsRosterAndTitle",
+                seen.url == "https://storage-staging.signal.org/v2/groups"
+                    && seen.auth.hasPrefix("Basic ")
+                    && fetched.members == [groupAlice.lowercased(), groupBob.lowercased()]
+                    && fetched.revision == 9
+                    && fetched.title == "Hiking Club"
+                    && applied
+                    && stored?.revision == 9
+                    && stored?.members == [groupAlice.lowercased(), groupBob.lowercased()]
+                    && thread.name == "Hiking Club",
+                "members=\(fetched.members) revision=\(fetched.revision) title=\(String(describing: fetched.title)) url=\(seen.url)"
+            )
+        } catch {
+            check("MessagingTests.testGroupFetchImportsRosterAndTitle", false, "\(error)")
+        }
+
+        // A 403 (kicked / unknown group) throws and leaves the stored
+        // roster untouched; the thread still renders.
+        do {
+            let forbiddenKey = Data(repeating: 0x0C, count: 32)
+            try manager.joinKnownGroup(
+                masterKey: forbiddenKey, revision: 5, members: [groupAlice, groupBob]
+            )
+            do {
+                _ = try await GroupStateFetch.fetch(
+                    masterKey: forbiddenKey,
+                    environment: .staging,
+                    http: groupFetchHttp(status: 403, body: Data()),
+                    credentials: GroupFetchCredentials(presentationHex: "00")
+                )
+                check("MessagingTests.testGroupFetchForbiddenKeepsRoster", false, "no error thrown")
+            } catch GroupFetchError.transferFailed(status: 403) {
+                let stored = try groups.load(masterKey: forbiddenKey)
+                let conversations = ConversationStore(queue: db.queue)
+                let thread = try conversations.conversation(forGroup: forbiddenKey)
+                check(
+                    "MessagingTests.testGroupFetchForbiddenKeepsRoster",
+                    stored?.revision == 5
+                        && stored?.members == [groupAlice, groupBob]
+                        && thread.kind == "group",
+                    "\(String(describing: stored))"
+                )
+            }
+        } catch {
+            check("MessagingTests.testGroupFetchForbiddenKeepsRoster", false, "\(error)")
+        }
+
+        // One undecryptable member entry is skipped; the rest import.
+        do {
+            let skipKey = Data(repeating: 0x0D, count: 32)
+            let body = try groupFetchFixture(
+                masterKey: skipKey,
+                memberAcis: [groupAlice, groupBob],
+                badEntries: [Data("not-a-ciphertext".utf8)],
+                title: "Kept Title"
+            )
+            // Splice the bad entry between the two good ones.
+            var response = try SignalServiceProtos_GroupResponse(serializedBytes: body)
+            var reordered = response.group.members
+            reordered.insert(reordered.removeLast(), at: 1)
+            response.group.members = reordered
+            let reorderedBody = try response.serializedData()
+            let fetched = try await GroupStateFetch.fetch(
+                masterKey: skipKey,
+                environment: .staging,
+                http: groupFetchHttp(status: 200, body: reorderedBody),
+                credentials: GroupFetchCredentials(presentationHex: "00")
+            )
+            check(
+                "MessagingTests.testGroupFetchSkipsBadMember",
+                fetched.members == [groupAlice.lowercased(), groupBob.lowercased()]
+                    && fetched.revision == 9
+                    && fetched.title == "Kept Title",
+                "\(fetched.members)"
+            )
+        } catch {
+            check("MessagingTests.testGroupFetchSkipsBadMember", false, "\(error)")
+        }
+
+        // Embedded server public params parse (pins the per-environment
+        // constants against libsignal, TrustRoots-style).
+        do {
+            var ok = true
+            for environment in [AppEnvironment.staging, AppEnvironment.production] as [AppEnvironment] {
+                guard
+                    let raw = Data(base64Encoded: GroupStateFetch.serverPublicParamsBase64(environment: environment)),
+                    (try? ServerPublicParams(contents: raw)) != nil
+                else {
+                    ok = false
+                    break
+                }
+            }
+            check("MessagingTests.testServerPublicParamsParse", ok)
+        } catch {
+            check("MessagingTests.testServerPublicParamsParse", false, "\(error)")
         }
     } catch {
         check("MessagingTests.testGroupSend", false, "\(error)")

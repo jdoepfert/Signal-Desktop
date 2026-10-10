@@ -56,6 +56,19 @@ public final class ConversationStore: Sendable {
         try fetchOrCreate(id: Self.groupId(masterKey), kind: "group", name: nil)
     }
 
+    /// Stores the server-reported group title so `conversationTitle` shows
+    /// it instead of the `Group <hex>` placeholder. Nil clears back to the
+    /// placeholder. Never creates the row — titles attach to threads the
+    /// message layer already made.
+    public func setGroupTitle(masterKey: Data, title: String?) throws {
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE conversations SET name = ? WHERE id = ?",
+                arguments: [title, Self.groupId(masterKey)]
+            )
+        }
+    }
+
     public func allConversations() throws -> [StoredConversation] {
         try queue.read { db in
             try StoredConversation.fetchAll(
